@@ -25,4 +25,7 @@ jobs:
           req=urllib.request.Request('https://apps.aiwizards.com/v1/apps/'+os.environ['GITHUB_REPOSITORY'],headers={'User-Agent':'wizard-cloudflare-release/1'})
           data=json.load(urllib.request.urlopen(req))
           print(json.dumps(data))
+          assert data['listed'] is True
+          assert data['install']['commit'] == os.environ['GITHUB_SHA']
+          assert data['last_check']['ok'] is True
           PY
