@@ -1,0 +1,103 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Wizard Cloudflare",
+    "version": "1.1.0",
+    "description": "Private owner API plus the separate wizard.cloudflare-connection/1 consumer boundary. Provider failures are categorical and never include provider bodies."
+  },
+  "servers": [{"url": "/"}],
+  "components": {
+    "securitySchemes": {
+      "ownerGateway": {"type": "apiKey", "in": "cookie", "name": "wz_session", "description": "Private browser session cookie used after bootstrap."},
+      "ownerCookie": {"type": "apiKey", "in": "header", "name": "X-Wizard-Owner-Token", "description": "Server-side secret injected by a trusted owner gateway and required on every owner route. Never expose it to browser JavaScript. After bootstrap, the private wz_session cookie is also required; writes additionally require trusted Origin and X-CSRF-Token. The gateway must strip untrusted forwarding headers."},
+      "consumerGrant": {"type": "http", "scheme": "bearer", "description": "One-time-issued, hashed-at-rest scoped consumer grant."},
+      "adminBearer": {"type": "http", "scheme": "bearer", "description": "Separate WIZARD_ADMIN_TOKEN required for every MCP call, including loopback."}
+    },
+    "schemas": {
+      "Error": {"type": "object", "required": ["error"], "properties": {"error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}},
+      "AccountId": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+      "ConnectionTarget": {"type": "object", "required": ["connection_id", "account_id"], "properties": {"connection_id": {"type": "string"}, "account_id": {"$ref": "#/components/schemas/AccountId"}}},
+      "TokenConnect": {"type": "object", "additionalProperties": false, "required": ["name", "token"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "token": {"type": "string", "minLength": 8, "maxLength": 4096}, "account_id": {"oneOf": [{"$ref": "#/components/schemas/AccountId"}, {"type": "null"}]}}},
+      "DnsCreate": {"type": "object", "additionalProperties": false, "required": ["zone_id", "type", "name", "content"], "properties": {"zone_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "type": {"type": "string", "minLength": 1, "maxLength": 16}, "name": {"type": "string", "minLength": 1, "maxLength": 253}, "content": {"type": "string", "minLength": 1, "maxLength": 4096}, "ttl": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "proxied": {"type": "boolean"}}},
+      "DnsUpdate": {"type": "object", "additionalProperties": false, "required": ["zone_id", "record_id", "type", "name", "content"], "properties": {"zone_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "record_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "type": {"type": "string", "minLength": 1, "maxLength": 16}, "name": {"type": "string", "minLength": 1, "maxLength": 253}, "content": {"type": "string", "minLength": 1, "maxLength": 4096}, "ttl": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "proxied": {"type": "boolean"}}},
+      "R2BucketCreate": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}, "location": {"type": "string", "minLength": 1, "maxLength": 64}, "storage_class": {"type": "string", "minLength": 1, "maxLength": 64}}},
+      "R2ObjectPut": {"type": "object", "additionalProperties": false, "required": ["bucket", "key", "content_base64"], "properties": {"bucket": {"type": "string", "minLength": 1, "maxLength": 128}, "key": {"type": "string", "minLength": 1, "maxLength": 1024}, "content_base64": {"type": "string", "contentEncoding": "base64", "description": "Decoded maximum 1 MiB"}, "content_type": {"type": "string", "minLength": 1, "maxLength": 200}}},
+      "WorkerDeploy": {"type": "object", "additionalProperties": false, "required": ["script", "main_module", "code"], "properties": {"script": {"type": "string", "minLength": 1, "maxLength": 128}, "main_module": {"enum": ["worker.js", "index.js", "worker.mjs", "index.mjs"]}, "code": {"type": "string", "minLength": 1, "maxLength": 1048576}}},
+      "RegistrarRegisterBlocked": {"type": "object", "additionalProperties": false, "required": ["domain_name", "years", "privacy_mode", "acknowledgements"], "properties": {"domain_name": {"type": "string", "maxLength": 253}, "years": {"type": "integer", "minimum": 1, "maximum": 10}, "privacy_mode": {}, "acknowledgements": {}, "description": "Review-only shape; confirmation always fails closed."}},
+      "ApprovalPrepare": {"allOf": [{"$ref": "#/components/schemas/ConnectionTarget"}, {"type": "object", "required": ["action", "payload"], "properties": {"action": {"enum": ["dns.create", "dns.update", "r2.bucket.create", "r2.object.put", "workers.deploy", "registrar.register"]}, "payload": {"oneOf": [{"$ref": "#/components/schemas/DnsCreate"}, {"$ref": "#/components/schemas/DnsUpdate"}, {"$ref": "#/components/schemas/R2BucketCreate"}, {"$ref": "#/components/schemas/R2ObjectPut"}, {"$ref": "#/components/schemas/WorkerDeploy"}, {"$ref": "#/components/schemas/RegistrarRegisterBlocked"}]}}}]},
+      "GrantCreate": {"allOf": [{"$ref": "#/components/schemas/ConnectionTarget"}, {"type": "object", "additionalProperties": false, "required": ["connection_id", "account_id", "bucket", "capabilities", "client_identifier", "ttl"], "properties": {"bucket": {"type": "string", "minLength": 1, "maxLength": 128}, "client_identifier": {"type": "string", "minLength": 1, "maxLength": 120}, "capabilities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["r2.objects.read", "r2.object.metadata.read"]}}, "ttl": {"type": "integer", "minimum": 60, "maximum": 2592000}}}]},
+      "Empty": {"type": "object", "additionalProperties": false},
+      "JsonRpc": {"type": "object", "required": ["jsonrpc", "method"], "properties": {"jsonrpc": {"const": "2.0"}, "id": {}, "method": {"type": "string"}, "params": {"type": "object"}}}
+    },
+    "responses": {
+      "Problem": {"description": "Categorical error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+    }
+  },
+  "paths": {
+    "/api/session": {
+      "post": {"summary": "Bootstrap durable owner session", "description": "Requires the server-side owner gateway header, trusted actual Origin, same-origin fetch metadata and X-Wizard-Request: bootstrap. Authorization and forwarding headers are refused. HTTPS origins receive a Secure, HttpOnly, SameSite=Lax cookie.", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Empty"}}}}, "responses": {"201": {"description": "HttpOnly SameSite=Lax cookie plus one CSRF value"}, "401": {"$ref": "#/components/responses/Problem"}, "503": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/connections": {
+      "get": {"summary": "List connection/account metadata, OAuth availability and write gate", "security": [{"ownerGateway": [], "ownerCookie": []}], "responses": {"200": {"description": "No credentials are included; bounded account inventory includes completion metadata"}, "401": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/connections/token": {
+      "post": {"summary": "Verify and persist scoped token fallback", "description": "Available only when native OAuth prerequisites are absent.", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TokenConnect"}}}}, "responses": {"201": {"description": "Connected metadata"}, "409": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/oauth/start": {
+      "post": {"summary": "Start five-minute public-client PKCE flow", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}}}}}}, "responses": {"201": {"description": "Consent URL, expiry and pending status"}, "409": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/oauth/status": {
+      "get": {"summary": "List recent flows for this browser session", "security": [{"ownerCookie": []}], "responses": {"200": {"description": "At most ten durable flow statuses"}}}
+    },
+    "/api/oauth/cancel": {
+      "post": {"summary": "Cancel this session's pending flow and advance generation", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Empty"}}}}, "responses": {"200": {"description": "Cancellation status"}}}
+    },
+    "/oauth/callback": {
+      "get": {"summary": "Session-bound one-use OAuth callback", "description": "The trusted gateway must inject the owner header; the browser session cookie remains required.", "security": [{"ownerCookie": [], "ownerGateway": []}], "parameters": [{"in": "query", "name": "state", "required": true, "schema": {"type": "string"}}, {"in": "query", "name": "code", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "No-store, no-referrer completion page after atomic compare-and-commit"}, "400": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/connections/{id}/disconnect": {
+      "post": {"summary": "Idempotently disconnect, revoke dependent state, and attempt OAuth revoke", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Empty"}}}}, "responses": {"200": {"description": "disconnected or disconnected_revoke_pending"}}}
+    },
+    "/api/connections/{id}/resources": {
+      "get": {"summary": "Read one bounded exact-account section", "description": "Sections: account, billing, r2, r2_objects, r2_metadata, workers, worker, zones, dns, registrations. Workers/zones/DNS use page; R2/objects/registrations use cursor. Registrar registrations accepts at most 50 per page.", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}, {"in": "query", "name": "account_id", "required": true, "schema": {"$ref": "#/components/schemas/AccountId"}}, {"in": "query", "name": "section", "required": true, "schema": {"enum": ["account", "billing", "r2", "r2_objects", "r2_metadata", "workers", "worker", "zones", "dns", "registrations"]}}, {"in": "query", "name": "per_page", "schema": {"type": "integer", "minimum": 1, "maximum": 100}}, {"in": "query", "name": "cursor", "description": "R2, R2 objects and registrations only.", "schema": {"type": "string", "maxLength": 1024}}, {"in": "query", "name": "page", "description": "Workers, zones and DNS only.", "schema": {"type": "integer", "minimum": 1, "maximum": 10000}}, {"in": "query", "name": "bucket", "schema": {"type": "string"}}, {"in": "query", "name": "prefix", "schema": {"type": "string", "maxLength": 1024}}, {"in": "query", "name": "key", "schema": {"type": "string", "maxLength": 1024}}, {"in": "query", "name": "script", "schema": {"type": "string"}}, {"in": "query", "name": "zone", "schema": {"type": "string", "pattern": "^[0-9a-f]{32}$"}}], "responses": {"200": {"description": "Result plus honest completion/pagination metadata; full pages without provider evidence remain incomplete"}, "403": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/registrar/search": {
+      "post": {"summary": "Read-only registrar domain search", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"allOf": [{"$ref": "#/components/schemas/ConnectionTarget"}, {"type": "object", "required": ["q"], "properties": {"q": {"type": "string", "maxLength": 253}}}]}}}}, "responses": {"200": {"description": "Cloudflare domain-search result"}}}
+    },
+    "/api/registrar/check": {
+      "post": {"summary": "Read-only registrar availability/pricing check", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"allOf": [{"$ref": "#/components/schemas/ConnectionTarget"}, {"type": "object", "required": ["domains"], "properties": {"domains": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "maxLength": 253}}}}]}}}}, "responses": {"200": {"description": "Cloudflare domain-check result"}}}
+    },
+    "/api/approvals": {
+      "get": {"summary": "List at most 100 approval metadata records", "security": [{"ownerCookie": []}], "responses": {"200": {"description": "Bounded approval list without payloads"}}},
+      "post": {"summary": "Prepare canonical exact action for five minutes", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApprovalPrepare"}}}}, "responses": {"201": {"description": "Full payload, digest, connection/account/revision and status"}}}
+    },
+    "/api/approvals/{id}": {
+      "get": {"summary": "Read full bounded approval payload and metadata", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Exact review data"}, "404": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/approvals/{id}/review": {
+      "post": {"summary": "Adopt MCP pending_review request into this owner session", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Empty"}}}}, "responses": {"200": {"description": "Owner-bound pending approval"}}}
+    },
+    "/api/approvals/{id}/confirm": {
+      "post": {"summary": "One-use owner confirmation; provider writes disabled by default", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["payload_digest"], "properties": {"payload_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}}}, "responses": {"200": {"description": "Succeeded"}, "403": {"$ref": "#/components/responses/Problem"}, "409": {"description": "Closed, stale, or registration blocked"}}}
+    },
+    "/api/approvals/{id}/cancel": {
+      "post": {"summary": "Cancel pending or pending_review approval", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Empty"}}}}, "responses": {"200": {"description": "Cancelled"}}}
+    },
+    "/api/grants": {
+      "get": {"summary": "List at most 100 grant metadata records; never bearers", "security": [{"ownerCookie": []}], "responses": {"200": {"description": "Grant metadata"}}},
+      "post": {"summary": "Create exact-bucket read grant and show bearer once", "security": [{"ownerCookie": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/GrantCreate"}}}}, "responses": {"201": {"description": "wizard.cloudflare-connection/1 grant including one-time bearer"}}}
+    },
+    "/api/grants/{id}/revoke": {
+      "post": {"summary": "Idempotently revoke grant", "security": [{"ownerCookie": []}], "parameters": [{"in": "path", "name": "id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Empty"}}}}, "responses": {"200": {"description": "Revoked"}}}
+    },
+    "/consumer/v1/r2/objects": {
+      "get": {"summary": "Bounded object metadata list for the grant's exact bucket", "security": [{"consumerGrant": []}], "parameters": [{"in": "query", "name": "prefix", "schema": {"type": "string", "maxLength": 1024}}, {"in": "query", "name": "cursor", "schema": {"type": "string", "maxLength": 1024}}, {"in": "query", "name": "per_page", "schema": {"type": "integer", "minimum": 1, "maximum": 100}}], "responses": {"200": {"description": "Read metadata only; never object bytes or provider token"}, "403": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/consumer/v1/r2/metadata": {
+      "get": {"summary": "Exact object metadata via bounded prefix listing", "security": [{"consumerGrant": []}], "parameters": [{"in": "query", "name": "key", "required": true, "schema": {"type": "string", "maxLength": 1024}}, {"in": "query", "name": "per_page", "schema": {"type": "integer", "minimum": 1, "maximum": 100}}], "responses": {"200": {"description": "One exact metadata match"}, "404": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/mcp": {
+      "post": {"summary": "MCP JSON-RPC for status, reads, prepare/status/cancel", "description": "No connect, owner session, approval confirmation, grant, delete or write-gate tools. Browser and forwarding headers are refused. WIZARD_ADMIN_TOKEN is mandatory regardless of Host.", "security": [{"adminBearer": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JsonRpc"}}}}, "responses": {"200": {"description": "JSON-RPC response"}, "202": {"description": "Notification accepted"}, "401": {"$ref": "#/components/responses/Problem"}, "503": {"$ref": "#/components/responses/Problem"}}}
+    }
+  }
+}
