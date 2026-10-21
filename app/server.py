@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parent.parent; DATA=Path(os.getenv('DATA_DIR',ROOT/'.data')); WEB=ROOT/'web'
-APP_ID='wizard-cloudflare'; VERSION='1.4.0-testing'; PORT=int(os.getenv('PORT','18805'))
+APP_ID='wizard-cloudflare'; VERSION='1.4.1-testing'; PORT=int(os.getenv('PORT','18805'))
 API='https://api.cloudflare.com/client/v4'
 OAUTH={'auth':'https://dash.cloudflare.com/oauth2/auth','token':'https://dash.cloudflare.com/oauth2/token','revoke':'https://dash.cloudflare.com/oauth2/revoke','userinfo':'https://dash.cloudflare.com/oauth2/userinfo'}
 WRITES=os.getenv('CF_ALLOW_WRITES','false').lower()=='true'
