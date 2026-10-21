@@ -1,10 +1,10 @@
 ---
 wizard: 0.2
 id: wizard-cloudflare
-name: Cloudflare (Testing)
+name: Cloudflare
 type: external
 category: system
-version: 1.4.2-testing
+version: 1.4.3
 summary: "Sign in to Cloudflare once; your Wizard publishes sites, stores backups and manages domains."
 license: GPL-3.0-only
 source: https://github.com/oscarhenrycollins/wizard-cloudflare

@@ -1,4 +1,4 @@
-# Cloudflare for Wizard (Testing)
+# Cloudflare for Wizard
 
 Sign in to your own Cloudflare accounts once, inside your own Wizard; then ask your Wizard to do the work. Each owner's app runs on their box and contacts Cloudflare directly. The page and agent never receive provider tokens.
 
@@ -19,7 +19,7 @@ Sign in to your own Cloudflare accounts once, inside your own Wizard; then ask y
 - Files is mounted read-only; folder reads never follow symlinks and every file is re-hashed against the approved list before upload.
 - Older read-only sign-ins keep working for reads; the page shows **Sign in again to let your Wizard make changes** until the owner re-consents.
 
-**Testing release, not dashboard parity.** Signup, payment methods, account agreements and billing stay on Cloudflare's own website. R2 needs a payment method on the Cloudflare account. There is no backup scheduler.
+**Not dashboard parity.** Signup, payment methods, account agreements and billing stay on Cloudflare's own website. R2 needs a payment method on the Cloudflare account. There is no backup scheduler.
 
 ## Install
 

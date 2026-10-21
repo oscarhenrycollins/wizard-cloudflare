@@ -1,17 +1,17 @@
 {
-  "name": "Cloudflare (Testing)",
+  "name": "Cloudflare",
   "id": "wizard-cloudflare",
   "wizard_type": "external",
   "available": true,
-  "short_desc": "External: Sign in once; your Wizard publishes sites, backs up files and manages domains (Testing).",
+  "short_desc": "External: Sign in once; your Wizard publishes sites, backs up files and manages domains.",
   "author": "Humanity Labs",
   "port": 18805,
   "categories": [
     "network"
   ],
   "description": "Sign in to Cloudflare once (or create a free account there). The app shows each account's websites, storage and domains; your Wizard does the work: publish a Files folder as a website, back up folders to R2, change DNS and price domains. Every change waits for your Approve tap; nothing is deleted or bought. Configure your own shell host/origin and owner login.",
-  "tipi_version": 9,
-  "version": "1.4.2-testing",
+  "tipi_version": 10,
+  "version": "1.4.3",
   "source": "https://github.com/oscarhenrycollins/wizard-cloudflare",
   "exposable": false,
   "supported_architectures": [

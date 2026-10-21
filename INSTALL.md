@@ -1,6 +1,6 @@
 # First installation on another owner's Wizard
 
-This testing release is portable, but authenticated-shell setup is still explicit. It does not discover or trust the first visiting user, and it does not require the publisher's credentials. Each owner supplies their own exact shell identity and addresses.
+This release is portable, but authenticated-shell setup is still explicit. It does not discover or trust the first visiting user, and it does not require the publisher's credentials. Each owner supplies their own exact shell identity and addresses.
 
 ## 1. Install with your shell settings
 
@@ -22,7 +22,7 @@ Current Wizard's same-origin gateway uses `~/.wizard-os/links.json`. Preserve it
 ```json
 {
   "id": "wizard-cloudflare",
-  "name": "Cloudflare (Testing)",
+  "name": "Cloudflare",
   "category": "system",
   "port": 18805,
   "path": "/",
