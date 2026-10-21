@@ -1,17 +1,25 @@
 # Cloudflare for Wizard (Testing)
 
-A read-only connection to your own Cloudflare accounts, inside your own Wizard. Each owner's app runs on their box and contacts Cloudflare directly. The page and agent never receive provider tokens.
+Sign in to your own Cloudflare accounts once, inside your own Wizard; then ask your Wizard to do the work. Each owner's app runs on their box and contacts Cloudflare directly. The page and agent never receive provider tokens.
 
-## Available now
+## What you see
 
-- Several named Cloudflare sign-ins and explicit account selection.
-- R2 buckets, bounded object lists and metadata (not private object downloads).
-- Workers scripts/settings; account-bound zones and DNS records.
-- Registrar search, availability checks and registrations where Cloudflare grants access.
-- Contextual links to Cloudflare's own billing dashboard.
-- A narrow MCP interface for the agent on your box.
+- Signed out: one **Sign in with Cloudflare** button (Cloudflare's own page; new people use **Sign up free** first, then sign in).
+- Signed in: one small card per account with **Websites** (Workers), **Storage** (bytes stored in R2) and **Domains** (zones); accounts with nothing in use collapse to one line. Three example asks for your Wizard (tap to copy).
+- A compact **Your Wizard wants to …** card with Approve / Decline, only while a change is waiting.
 
-**Testing release, not dashboard parity. Changes and purchases are disabled in the shipped recipe.** Signup, payment methods, account agreements and billing stay on Cloudflare's own website. There is no account-creation automation, payment-card handling or backup scheduler.
+## What your Wizard can do (MCP, box only)
+
+- Reads: overview numbers, R2 buckets/objects/metadata, Workers, zones, DNS records, Registrar search and price checks.
+- Changes, each waiting for the owner's Approve tap (and a Notifications ping when that app is installed):
+  - `site.publish`: publish a Files folder as a website on `<name>.<subdomain>.workers.dev` (Workers static assets; no routes or custom domains are touched).
+  - `r2.backup`: copy a Files folder into an R2 bucket under a fresh, approval-bound folder (never overwrites).
+  - `r2.bucket.create`, `r2.object.put`, `dns.create`, `dns.update`, `workers.deploy`.
+- Not possible: deleting anything, buying domains (price only), billing, creating accounts.
+- Files is mounted read-only; folder reads never follow symlinks and every file is re-hashed against the approved list before upload.
+- Older read-only sign-ins keep working for reads; the page shows **Sign in again to let your Wizard make changes** until the owner re-consents.
+
+**Testing release, not dashboard parity.** Signup, payment methods, account agreements and billing stay on Cloudflare's own website. R2 needs a payment method on the Cloudflare account. There is no backup scheduler.
 
 ## Install
 

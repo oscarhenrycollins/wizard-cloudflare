@@ -13,7 +13,7 @@ wam install oscarhenrycollins/wizard-cloudflare \
   --set 'WIZARD_TRUSTED_ORIGINS=https://your-box.your-tailnet.ts.net:8796'
 ```
 
-A normal `wam install` without those settings installs but owner APIs fail closed until configured. Keep this app's `app.env` private (0600). Do not copy another owner's app.env or volume. The OAuth client, read-only scopes, shared callback and box-only MCP defaults are already in the public recipe. No API token or OAuth client secret is required.
+A normal `wam install` without those settings installs but owner APIs fail closed until configured. Keep this app's `app.env` private (0600). Do not copy another owner's app.env or volume. The OAuth client, scopes (read plus `workers-scripts.write`, `dns.write`, `workers-r2.write`, `workers-r2-bucket-item.write`), shared callback and box-only MCP defaults are already in the public recipe. No API token or OAuth client secret is required.
 
 ## 2. Route it inside Wizard
 
