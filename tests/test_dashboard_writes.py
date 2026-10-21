@@ -206,6 +206,47 @@ class FolderTests(ServiceCase):
         self.problem('invalid_payload', lambda: self.service.validate_action('site.publish', {'script': 'Bad_Name', 'folder': 'Sites/hello'}))
         self.problem('invalid_payload', lambda: self.service.validate_action('r2.backup', {'bucket': 'b', 'folder': 'Sites/hello', 'prefix': '../x'}))
 
+    def test_symlinks_inside_folder_are_never_read(self):
+        outside = Path(self.media.name).parent / (Path(self.media.name).name + '-outside.txt'); outside.write_text('secret')
+        self.addCleanup(outside.unlink)
+        os.symlink(outside, server.MEDIA / 'Sites/hello/leak.txt')
+        os.symlink(Path(self.media.name).parent, server.MEDIA / 'Sites/hello/up')
+        manifest = server.scan_folder('Sites/hello', server.SITE_LIMITS)
+        self.assertEqual([f['path'] for f in manifest['files']], ['css/a.css', 'index.html'])
+
+    def test_symlinked_folder_component_refused(self):
+        os.symlink(server.MEDIA / 'Sites', server.MEDIA / 'Linked')
+        self.problem('folder_not_found', lambda: server.scan_folder('Linked/hello', server.SITE_LIMITS))
+
+    def test_file_swapped_for_symlink_after_scan_is_refused(self):
+        manifest = server.scan_folder('Sites/hello', server.SITE_LIMITS)
+        target = server.MEDIA / 'Sites/hello/index.html'; copy = Path(self.media.name) / 'copy.html'; copy.write_bytes(target.read_bytes())
+        target.unlink(); os.symlink(copy, target)
+        self.problem('folder_changed', lambda: server.read_checked('Sites/hello', manifest['files'][1]))
+        (server.MEDIA / 'Sites/hello/css').rename(server.MEDIA / 'Sites/hello/css-real'); os.symlink(server.MEDIA / 'Sites/hello/css-real', server.MEDIA / 'Sites/hello/css')
+        self.problem('folder_changed', lambda: server.read_checked('Sites/hello', manifest['files'][0]))
+
+    def test_backup_prefix_is_bound_to_the_approval(self):
+        with mock.patch.object(server.time, 'strftime', return_value='2026-10-21'):
+            out = self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'backups', 'folder': 'Sites/hello'}, source='mcp')
+        manifest = json.loads(self.raw_manifest(out['id']))
+        self.assertEqual(manifest['prefix'], '2026-10-21/hello')
+        self.assertEqual(out['payload_digest'], server.sha(server.canon({'payload': out['payload'], 'manifest': manifest})))
+        self.assertIn('backups/2026-10-21/hello', self.service.home('s')['approvals'][0]['text'])
+        self.service.review(out['id'], 'owner')
+        with mock.patch.object(server.time, 'strftime', return_value='2030-01-01'):
+            self.service.confirm(out['id'], 'owner', out['payload_digest'])
+        puts = [c[1].rsplit('/objects/', 1)[1] for c in self.fake.calls if c[0] == 'PUT']
+        self.assertTrue(puts and all(x.startswith('2026-10-21%2Fhello%2F') for x in puts))
+
+    def test_backup_never_overwrites(self):
+        self.fake.queue({'success': True, 'result': [{'key': 'p1/index.html'}]})
+        self.problem('backup_exists', lambda: self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'backups', 'folder': 'Sites/hello', 'prefix': 'p1'}, source='mcp'))
+        out = self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'backups', 'folder': 'Sites/hello', 'prefix': 'p2'}, source='mcp')
+        self.service.review(out['id'], 'owner'); self.fake.queue({'success': True, 'result': [{'key': 'p2/x'}]})
+        self.problem('backup_exists', lambda: self.service.confirm(out['id'], 'owner', out['payload_digest']))
+        self.assertFalse(any(c[0] == 'PUT' for c in self.fake.calls))
+
     def raw_manifest(self, approval_id):
         with server.db() as conn: return conn.execute('SELECT manifest FROM approvals WHERE id=?', (approval_id,)).fetchone()['manifest']
 

@@ -1,5 +1,5 @@
 """Private, owner-controlled Cloudflare connector (stdlib-only runtime)."""
-import base64, hashlib, hmac, json, mimetypes, os, re, secrets, sqlite3, tempfile, threading, time
+import base64, hashlib, hmac, json, mimetypes, os, re, secrets, sqlite3, stat, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
 import urllib.error, urllib.parse, urllib.request
 from contextlib import contextmanager
@@ -180,41 +180,67 @@ def human_size(n):
  for unit in ('B','KB','MB','GB','TB'):
   if n<1000 or unit=='TB':return f"{n:.0f} {unit}" if unit=='B' or n>=10 else f"{n:.1f} {unit}"
   n/=1000
-def media_path(value):
- # Folders come from the owner's Files (mounted read-only at MEDIA). Relative only; no dot-segments, hidden parts or symlink escapes.
+def _folder_parts(value):
  if not isinstance(value,str) or not 1<=len(value)<=500 or value.startswith(('/','\\')) or '\x00' in value:raise Problem(400,'invalid_folder','Give a folder path relative to Files.')
  parts=[x for x in value.strip('/').split('/') if x]
  if not parts or any(x in ('.','..') or x.startswith('.') for x in parts):raise Problem(400,'invalid_folder','Give a folder path relative to Files.')
- root=os.path.realpath(MEDIA); target=os.path.realpath(os.path.join(root,*parts))
+ return parts
+def media_path(value):
+ # Folders come from the owner's Files (mounted read-only at MEDIA). Relative only; no dot-segments or hidden parts.
+ parts=_folder_parts(value); root=os.path.realpath(MEDIA); target=os.path.realpath(os.path.join(root,*parts))
  if os.path.commonpath([root,target])!=root:raise Problem(400,'invalid_folder','Folder is outside Files.')
  return target
+NOFOLLOW=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_CLOEXEC',0)
+def _open_dir(parts):
+ # Walk from the Files root one component at a time without following symlinks, so a swapped link can't escape.
+ fd=os.open(MEDIA,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_CLOEXEC',0))
+ try:
+  for part in parts:
+   nxt=os.open(part,NOFOLLOW|getattr(os,'O_DIRECTORY',0),dir_fd=fd); os.close(fd); fd=nxt
+  return fd
+ except OSError:
+  os.close(fd); raise Problem(404,'folder_not_found','That folder is not in Files.') from None
+def _read_file(dir_fd,name,limit):
+ fd=os.open(name,NOFOLLOW,dir_fd=dir_fd)
+ try:
+  info=os.fstat(fd)
+  if not stat.S_ISREG(info.st_mode):raise OSError('not a regular file')
+  if info.st_size>limit:return info.st_size,None
+  chunks=[]; left=limit+1
+  while left>0:
+   chunk=os.read(fd,min(left,1<<20))
+   if not chunk:break
+   chunks.append(chunk); left-=len(chunk)
+  return info.st_size,b''.join(chunks)
+ finally:os.close(fd)
 def scan_folder(folder,limits):
- most,per_file,total=limits; target=media_path(folder)
- if not os.path.isdir(target):raise Problem(404,'folder_not_found','That folder is not in Files.')
- files=[]; size=0
- for base,dirs,names in os.walk(target,followlinks=False):
-  dirs[:]=sorted(d for d in dirs if not d.startswith('.') and not os.path.islink(os.path.join(base,d)))
-  for name in sorted(names):
-   if name.startswith('.'):continue
-   full=os.path.join(base,name); info=os.lstat(full)
-   if not os.path.isfile(full) or os.path.islink(full):continue
-   if info.st_size>per_file:raise Problem(413,'file_too_large',f'{os.path.relpath(full,target)} is larger than {human_size(per_file)}.')
-   size+=info.st_size; files.append(full)
-   if len(files)>most or size>total:raise Problem(413,'folder_too_large',f'Folder is over {most} files or {human_size(total)}.')
- if not files:raise Problem(400,'folder_empty','That folder has no files.')
- entries=[]
- for full in files:
-  digest=hashlib.sha256()
-  with open(full,'rb') as stream:
-   for chunk in iter(lambda:stream.read(1<<20),b''):digest.update(chunk)
-  entries.append({'path':os.path.relpath(full,target).replace(os.sep,'/'),'size':os.path.getsize(full),'sha256':digest.hexdigest()})
+ most,per_file,total=limits; parts=_folder_parts(folder); root_fd=_open_dir(parts); entries=[]; size=0
+ try:
+  for base,dirs,names,dir_fd in os.fwalk('.',dir_fd=root_fd,follow_symlinks=False):
+   dirs[:]=sorted(d for d in dirs if not d.startswith('.'))
+   for name in sorted(names):
+    if name.startswith('.'):continue
+    try:length,data=_read_file(dir_fd,name,per_file)
+    except OSError:continue  # symlinks, sockets and vanished files are skipped
+    rel=os.path.normpath(os.path.join(base,name)).replace(os.sep,'/')
+    if data is None:raise Problem(413,'file_too_large',f'{rel} is larger than {human_size(per_file)}.')
+    size+=len(data); entries.append({'path':rel,'size':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+    if len(entries)>most or size>total:raise Problem(413,'folder_too_large',f'Folder is over {most} files or {human_size(total)}.')
+ finally:os.close(root_fd)
+ if not entries:raise Problem(400,'folder_empty','That folder has no files.')
  entries.sort(key=lambda e:e['path'])
- return {'folder':folder.strip('/'),'count':len(entries),'bytes':sum(e['size'] for e in entries),'files':entries}
+ return {'folder':'/'.join(parts),'count':len(entries),'bytes':sum(e['size'] for e in entries),'files':entries}
 def read_checked(folder,entry):
- full=os.path.join(media_path(folder),*entry['path'].split('/'))
- if os.path.islink(full):raise Problem(409,'folder_changed','Files changed after you were asked. Ask your Wizard to try again.')
- with open(full,'rb') as stream:data=stream.read(entry['size']+1)
- if len(data)!=entry['size'] or hashlib.sha256(data).hexdigest()!=entry['sha256']:raise Problem(409,'folder_changed','Files changed after you were asked. Ask your Wizard to try again.')
+ # Re-open by walking without symlinks and hash the exact bytes that will be uploaded.
+ changed=Problem(409,'folder_changed','Files changed after you were asked. Ask your Wizard to try again.')
+ rel=[x for x in entry['path'].split('/') if x]
+ if not rel or any(x in ('.','..') for x in rel):raise changed
+ try:fd=_open_dir(_folder_parts(folder)+rel[:-1])
+ except Problem:raise changed from None
+ try:_,data=_read_file(fd,rel[-1],entry['size'])
+ except OSError:raise changed from None
+ finally:os.close(fd)
+ if data is None or len(data)!=entry['size'] or hashlib.sha256(data).hexdigest()!=entry['sha256']:raise changed
  return data
 def notify_owner(text):
  # Best effort: ping the owner through the Notifications app when installed. Never blocks or fails the change.
@@ -630,9 +656,12 @@ class Service:
   if not self.can_change(connection,action):raise Problem(409,'sign_in_again','This sign-in cannot make changes. Ask the owner to open the Cloudflare app (/wizard-os-home/?open=wizard-cloudflare) and tap Sign in again.')
   manifest=None
   if action=='site.publish':manifest=scan_folder(payload['folder'],SITE_LIMITS)
-  if action=='r2.backup':manifest=scan_folder(payload['folder'],BACKUP_LIMITS)
+  if action=='r2.backup':
+   manifest=scan_folder(payload['folder'],BACKUP_LIMITS)
+   manifest['prefix']=(payload.get('prefix') or time.strftime('%Y-%m-%d',time.gmtime())+'/'+manifest['folder'].split('/')[-1]).strip('/')
   with self.authorized(connection_id,account) as (connection,headers):
    if action.startswith('dns.'):self._verify_dns_binding(headers,account,action,payload)
+   if action=='r2.backup':self._backup_free(account,payload['bucket'],manifest['prefix'],headers)
    if action=='site.publish':
     try:self.transport.request('GET',f"{API}/accounts/{account}/workers/scripts/{payload['script']}/settings",headers); manifest['replaces']=True
     except Problem as error:
@@ -652,7 +681,7 @@ class Service:
   p=payload if isinstance(payload,dict) else {}; m=manifest or {}
   files=f" ({m.get('count',0)} files, {human_size(m.get('bytes',0))})" if m else ''
   if action=='site.publish':return f"{'update' if m.get('replaces') else 'publish'} the website {p.get('script','')} from {p.get('folder','')}{files}"
-  if action=='r2.backup':return f"back up {p.get('folder','')} to {p.get('bucket','')}{files}"
+  if action=='r2.backup':return f"back up {p.get('folder','')} to {p.get('bucket','')}/{m.get('prefix') or p.get('prefix','')}{files}"
   if action=='dns.create':return f"add a DNS record {p.get('type','')} {p.get('name','')} → {p.get('content','')}"
   if action=='dns.update':return f"change the DNS record {p.get('type','')} {p.get('name','')} → {p.get('content','')}"
   if action=='r2.bucket.create':return f"create the storage bucket {p.get('name','')}"
@@ -757,8 +786,13 @@ class Service:
    if isinstance(name,str) and WORKER_NAME.fullmatch(name):address=f'https://{script}.{name}.workers.dev'
   except Problem:pass
   return {'website':script,'files':manifest['count'],'bytes':manifest['bytes'],'url':address}
+ def _backup_free(self,account,bucket,prefix,headers):
+  # Backups never overwrite: the approved prefix must be empty, checked when asked and again before uploading.
+  url=f"{API}/accounts/{account}/r2/buckets/{urllib.parse.quote(bucket,safe='')}/objects?"+urllib.parse.urlencode({'prefix':prefix+'/','per_page':1})
+  _,response=self.transport.request('GET',url,headers)
+  if isinstance(response.get('result'),list) and response['result']:raise Problem(409,'backup_exists',f'{bucket}/{prefix} already has files. Pick another prefix.')
  def _backup(self,account,payload,manifest,headers):
-  prefix=(payload.get('prefix') or time.strftime('%Y-%m-%d',time.gmtime())+'/'+manifest['folder'].split('/')[-1]).strip('/'); uploaded=0
+  prefix=manifest['prefix']; uploaded=0; self._backup_free(account,payload['bucket'],prefix,headers)
   for entry in manifest['files']:
    data=read_checked(payload['folder'],entry); key=f"{prefix}/{entry['path']}"
    url=f"{API}/accounts/{account}/r2/buckets/{urllib.parse.quote(payload['bucket'],safe='')}/objects/{urllib.parse.quote(key,safe='')}"
