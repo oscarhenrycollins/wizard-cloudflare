@@ -14,8 +14,14 @@ class RecipeTests(unittest.TestCase):
         env = svc['environment']
         self.assertNotIn('CF_DEVELOPMENT_MODE', env)
         self.assertEqual(env['DATA_DIR'], '/data/private'); self.assertEqual(env['PORT'], '18805')
-        self.assertEqual(env['CF_ALLOW_WRITES'], 'false')
-        self.assertEqual(svc['volumes'], ['cloudflare-private-data:/data'])
+        # Changes are on by default; each one still needs the owner's Approve tap in the app.
+        self.assertEqual(env['CF_ALLOW_WRITES'], '${CF_ALLOW_WRITES:-true}')
+        scopes = env['CF_OAUTH_SCOPE'].split(':-', 1)[1].rstrip('}').split()
+        self.assertNotIn('openid', scopes); self.assertIn('offline_access', scopes)
+        for scope in ('workers-scripts.write', 'dns.write', 'workers-r2.write', 'workers-r2-bucket-item.write'): self.assertIn(scope, scopes)
+        self.assertFalse([x for x in scopes if x.endswith(('.admin', '.edit')) or x.startswith('registrar') and not x.endswith('.read')])
+        # Files is read-only: the app reads folders to publish or back up, never writes the owner's files.
+        self.assertEqual(svc['volumes'], ['cloudflare-private-data:/data', '${ROOT_FOLDER_HOST}/media:/media:ro'])
         self.assertEqual(doc['volumes']['cloudflare-private-data']['name'], 'wizard-cloudflare-private-data')
         self.assertEqual(svc['x-runtipi']['internal_port'], 18805)
 

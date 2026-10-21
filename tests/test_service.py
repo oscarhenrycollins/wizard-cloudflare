@@ -87,7 +87,7 @@ class ResourceTests(ServiceCase):
  def test_per_page_bounded(self):self.problem('invalid_parameter',lambda:self.service.read_resource(self.connection['id'],A,'r2',{'per_page':101}))
 
 class ApprovalTests(ServiceCase):
- def setUp(self):super().setUp(); self.connection=self.connect(); self.fake.calls.clear()
+ def setUp(self):super().setUp(); self.connection=self.connect(); self.fake.calls.clear(); self.service.writes_allowed=True
  def prepare_bucket(self,source='ui',session='owner'):return self.service.prepare(self.connection['id'],A,'r2.bucket.create',{'name':'bucket'},session if source=='ui' else None,source)
  def test_unknown_fields_rejected(self):self.problem('invalid_payload',lambda:self.service.prepare(self.connection['id'],A,'r2.bucket.create',{'name':'b','extra':1},'s'))
  def test_dns_prepare_verifies_zone_and_record(self):
@@ -103,7 +103,7 @@ class ApprovalTests(ServiceCase):
   out=self.prepare_bucket()
   with server.db() as conn:conn.execute('UPDATE approvals SET expires=? WHERE id=?',(server.now()-1,out['id']))
   self.assertEqual(self.service.approval(out['id'])['status'],'expired'); self.assertEqual(self._row(out['id'])['status'],'expired')
- def test_disabled_write_has_zero_calls(self):out=self.prepare_bucket(); count=len(self.fake.calls); self.problem('writes_disabled',lambda:self.service.confirm(out['id'],'owner',out['payload_digest'])); self.assertEqual(len(self.fake.calls),count)
+ def test_disabled_write_has_zero_calls(self):out=self.prepare_bucket(); self.service.writes_allowed=False; count=len(self.fake.calls); self.problem('writes_disabled',lambda:self.service.confirm(out['id'],'owner',out['payload_digest'])); self.assertEqual(len(self.fake.calls),count)
  def test_digest_mismatch(self):self.service.writes_allowed=True; out=self.prepare_bucket(); self.problem('approval_mismatch',lambda:self.service.confirm(out['id'],'owner','0'*64))
  def test_cancel_and_replay(self):out=self.prepare_bucket(); self.assertEqual(self.service.cancel(out['id'])['status'],'cancelled'); self.problem('approval_closed',lambda:self.service.cancel(out['id']))
  def test_disconnect_closes_approval_and_grants(self):
@@ -115,7 +115,9 @@ class ApprovalTests(ServiceCase):
  def test_worker_put_is_multipart_metadata_and_module(self):
   self.service.writes_allowed=True; payload={'script':'demo','main_module':'worker.js','code':'export default {}'}; out=self.service.prepare(self.connection['id'],A,'workers.deploy',payload,'owner'); self.fake.queue({'success':True,'result':{}}); self.service.confirm(out['id'],'owner',out['payload_digest']); call=self.fake.calls[-1]; self.assertEqual(call[4]['body_kind'],'multipart'); self.assertIn('metadata',call[3]['fields']); self.assertIn('worker.js',call[3]['files'])
  def test_registration_always_blocked(self):
-  self.service.writes_allowed=True; out=self.service.prepare(self.connection['id'],A,'registrar.register',{'domain_name':'example.com','years':1,'privacy_mode':'redacted_contact_data','acknowledgements':['x']},'owner'); self.problem('registration_blocked',lambda:self.service.confirm(out['id'],'owner',out['payload_digest']))
+  self.problem('registration_blocked',lambda:self.service.prepare(self.connection['id'],A,'registrar.register',{'domain_name':'example.com','years':1,'privacy_mode':'redacted_contact_data','acknowledgements':['x']},'owner'))
+  with server.db() as conn:conn.execute("INSERT INTO approvals(id,connection_id,account_id,action,payload,payload_digest,revision,status,source,session_hash,expires,created,updated) VALUES('legacy',?,?,'registrar.register','{}',?,1,'pending','ui','owner',?,0,0)",(self.connection['id'],A,server.sha('{}'),server.now()+60))
+  self.problem('registration_blocked',lambda:self.service.confirm('legacy','owner',server.sha('{}')))
  def test_disconnect_waits_for_inflight_write(self):
   self.service.writes_allowed=True; out=self.prepare_bucket(); entered=threading.Event(); release=threading.Event(); original=self.fake.request
   def blocking(method,url,headers=None,body=None,**kwargs):
@@ -209,7 +211,7 @@ class RpcTests(ServiceCase):
  def test_unknown_method(self):self.assertEqual(server.rpc({'jsonrpc':'2.0','id':1,'method':'unknown'},self.service)['error']['code'],-32601)
  def test_no_connect_or_confirm_tools(self):names={x['name'] for x in server.TOOLS}; self.assertNotIn('cloudflare_connect',names); self.assertNotIn('cloudflare_approval_confirm',names)
  def test_mcp_prepare_is_reviewable(self):
-  self.fake.queue({'success':True,'result':{'id':A}}); connection=self.service.connect_token('x','token-value',A); message={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'cloudflare_action_prepare','arguments':{'connection_id':connection['id'],'account_id':A,'action':'r2.bucket.create','payload':{'name':'b'}}}}; result=server.rpc(message,self.service); self.assertEqual(result['result']['structuredContent']['status'],'pending_review')
+  self.service.writes_allowed=True; self.fake.queue({'success':True,'result':{'id':A}}); connection=self.service.connect_token('x','token-value',A); message={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'cloudflare_action_prepare','arguments':{'connection_id':connection['id'],'account_id':A,'action':'r2.bucket.create','payload':{'name':'b'}}}}; result=server.rpc(message,self.service); self.assertEqual(result['result']['structuredContent']['status'],'pending_review')
 
 class Response:
  def __init__(self,value,status=200):self.raw=value if isinstance(value,bytes) else json.dumps(value).encode(); self.status=status

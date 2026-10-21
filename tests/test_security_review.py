@@ -10,6 +10,7 @@ class SecurityReviewRegressions(ServiceCase):
         return self.service._persist_connection('Synthetic review fixture', 'token', {'access_token': 'synthetic-provider-token'}, [{'id': A, 'name': 'Synthetic'}])
 
     def race_disconnect(self, preparing=False):
+        self.service.writes_allowed = True
         connection = self.connected()
         entered, release, attempted, disconnected = (threading.Event() for _ in range(4))
         errors, prepared = [], []

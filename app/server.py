@@ -1,5 +1,6 @@
 """Private, owner-controlled Cloudflare connector (stdlib-only runtime)."""
 import base64, hashlib, hmac, json, mimetypes, os, re, secrets, sqlite3, tempfile, threading, time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error, urllib.parse, urllib.request
 from contextlib import contextmanager
 from http import cookies
@@ -7,12 +8,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parent.parent; DATA=Path(os.getenv('DATA_DIR',ROOT/'.data')); WEB=ROOT/'web'
-APP_ID='wizard-cloudflare'; VERSION='1.3.0-testing'; PORT=int(os.getenv('PORT','18805'))
+APP_ID='wizard-cloudflare'; VERSION='1.4.0-testing'; PORT=int(os.getenv('PORT','18805'))
 API='https://api.cloudflare.com/client/v4'
 OAUTH={'auth':'https://dash.cloudflare.com/oauth2/auth','token':'https://dash.cloudflare.com/oauth2/token','revoke':'https://dash.cloudflare.com/oauth2/revoke','userinfo':'https://dash.cloudflare.com/oauth2/userinfo'}
 WRITES=os.getenv('CF_ALLOW_WRITES','false').lower()=='true'
-MAX_BODY=1_450_000; MAX_RESPONSE=2_000_000; MAX_OBJECT=1_048_576; FLOW_TTL=300; APPROVAL_TTL=300; SESSION_TTL=28800
+MCP_APPROVAL_TTL=3600; MAX_BODY=1_450_000; MAX_RESPONSE=2_000_000; MAX_OBJECT=1_048_576; FLOW_TTL=300; APPROVAL_TTL=300; SESSION_TTL=28800
 ACCOUNT_ID=re.compile(r'^[0-9a-f]{32}$'); SAFE_ID=re.compile(r'^[A-Za-z0-9_.-]{1,128}$')
+# Each change the Wizard can prepare, and the Cloudflare permission it needs. Deletes and purchases are not here.
+ACTION_SCOPES={'dns.create':'dns.write','dns.update':'dns.write','r2.bucket.create':'workers-r2.write','r2.object.put':'workers-r2-bucket-item.write','r2.backup':'workers-r2-bucket-item.write','workers.deploy':'workers-scripts.write','site.publish':'workers-scripts.write'}
+WRITE_SCOPES=sorted(set(ACTION_SCOPES.values()))
+MEDIA=Path(os.getenv('MEDIA_DIR','/media')); NOTIFY_URL=os.getenv('WIZARD_NOTIFY_URL','http://notifications:8080/mcp').strip()
+SITE_LIMITS=(2000,25*1024*1024,60*1024*1024); BACKUP_LIMITS=(500,64*1024*1024,512*1024*1024)
+METRIC_TTL=120; METRIC_FAIL_TTL=30; METRICS={}; METRIC_LOCKS={}
+WORKER_SHIM='export default{fetch(request,env){return env.ASSETS.fetch(request)}}\n'
 DOMAIN=re.compile(r'^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$')
 
 class Problem(Exception):
@@ -59,6 +67,7 @@ def db():
  _private(path,0o600); _private(Path(str(path)+'-wal'),0o600); _private(Path(str(path)+'-shm'),0o600); return conn
 def _migrate(conn):
  additions={'connections':{'account_inventory':"TEXT NOT NULL DEFAULT '{}'"},'oauth_flows':{'name':"TEXT NOT NULL DEFAULT 'Cloudflare'",'status':"TEXT NOT NULL DEFAULT 'pending'",'session_generation':'INTEGER NOT NULL DEFAULT 0','global_generation':'INTEGER NOT NULL DEFAULT 0','connection_id':'TEXT','created':'INTEGER NOT NULL DEFAULT 0','redirect_uri':'TEXT'},'approvals':{'source':"TEXT NOT NULL DEFAULT 'ui'",'updated':'INTEGER NOT NULL DEFAULT 0'},'grants':{'client_identifier':"TEXT NOT NULL DEFAULT 'legacy-consumer'",'updated':'INTEGER NOT NULL DEFAULT 0'}}
+ additions['connections']['scopes']='TEXT'; additions['approvals'].update({'result':'TEXT','manifest':'TEXT'})
  for table,columns in additions.items():
   present={row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
   for name,declaration in columns.items():
@@ -122,7 +131,7 @@ class Transport:
    else:chunks += [f'--{boundary}\r\n'.encode(),f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),str(value).encode(),b'\r\n']
   for name,(filename,content_type,content) in files.items():chunks += [f'--{boundary}\r\n'.encode(),f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode(),f'Content-Type: {content_type}\r\n\r\n'.encode(),content,b'\r\n']
   chunks.append(f'--{boundary}--\r\n'.encode()); return b''.join(chunks)
- def request(self,method,url,headers=None,body=None,body_kind='json',envelope=True,require_result=True):
+ def request(self,method,url,headers=None,body=None,body_kind='json',envelope=True,require_result=True,timeout=12):
   if not self._allowed(url):raise Problem(500,'transport_policy','Provider endpoint refused.')
   request_headers={'User-Agent':f'{APP_ID}/{VERSION}','Accept':'application/json'}; request_headers.update(headers or {}); data=None
   if body is not None:
@@ -139,7 +148,7 @@ class Transport:
    else:raise Problem(500,'transport_policy','Unknown provider body encoding.')
   request=urllib.request.Request(url,data=data,method=method,headers=request_headers)
   try:
-   with self.opener.open(request,timeout=12) as response:raw=response.read(MAX_RESPONSE+1); status=response.status
+   with self.opener.open(request,timeout=timeout) as response:raw=response.read(MAX_RESPONSE+1); status=response.status
   except RedirectRefused:raise Problem(502,'provider_redirect','Cloudflare redirect refused.') from None
   except urllib.error.HTTPError as error:
    error.close()
@@ -160,6 +169,67 @@ class Transport:
    if value.get('success') is not True:raise Problem(502,'provider_rejected','Cloudflare rejected the request.')
    if require_result and 'result' not in value:raise Problem(502,'provider_malformed','Cloudflare returned a malformed response.')
   return status,value
+
+
+WORKER_NAME=re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+def worker_name(value):
+ if not isinstance(value,str) or not WORKER_NAME.fullmatch(value):raise Problem(400,'invalid_payload','Website names use lowercase letters, numbers and dashes (max 63).')
+ return value
+def human_size(n):
+ n=float(n or 0)
+ for unit in ('B','KB','MB','GB','TB'):
+  if n<1000 or unit=='TB':return f"{n:.0f} {unit}" if unit=='B' or n>=10 else f"{n:.1f} {unit}"
+  n/=1000
+def media_path(value):
+ # Folders come from the owner's Files (mounted read-only at MEDIA). Relative only; no dot-segments, hidden parts or symlink escapes.
+ if not isinstance(value,str) or not 1<=len(value)<=500 or value.startswith(('/','\\')) or '\x00' in value:raise Problem(400,'invalid_folder','Give a folder path relative to Files.')
+ parts=[x for x in value.strip('/').split('/') if x]
+ if not parts or any(x in ('.','..') or x.startswith('.') for x in parts):raise Problem(400,'invalid_folder','Give a folder path relative to Files.')
+ root=os.path.realpath(MEDIA); target=os.path.realpath(os.path.join(root,*parts))
+ if os.path.commonpath([root,target])!=root:raise Problem(400,'invalid_folder','Folder is outside Files.')
+ return target
+def scan_folder(folder,limits):
+ most,per_file,total=limits; target=media_path(folder)
+ if not os.path.isdir(target):raise Problem(404,'folder_not_found','That folder is not in Files.')
+ files=[]; size=0
+ for base,dirs,names in os.walk(target,followlinks=False):
+  dirs[:]=sorted(d for d in dirs if not d.startswith('.') and not os.path.islink(os.path.join(base,d)))
+  for name in sorted(names):
+   if name.startswith('.'):continue
+   full=os.path.join(base,name); info=os.lstat(full)
+   if not os.path.isfile(full) or os.path.islink(full):continue
+   if info.st_size>per_file:raise Problem(413,'file_too_large',f'{os.path.relpath(full,target)} is larger than {human_size(per_file)}.')
+   size+=info.st_size; files.append(full)
+   if len(files)>most or size>total:raise Problem(413,'folder_too_large',f'Folder is over {most} files or {human_size(total)}.')
+ if not files:raise Problem(400,'folder_empty','That folder has no files.')
+ entries=[]
+ for full in files:
+  digest=hashlib.sha256()
+  with open(full,'rb') as stream:
+   for chunk in iter(lambda:stream.read(1<<20),b''):digest.update(chunk)
+  entries.append({'path':os.path.relpath(full,target).replace(os.sep,'/'),'size':os.path.getsize(full),'sha256':digest.hexdigest()})
+ entries.sort(key=lambda e:e['path'])
+ return {'folder':folder.strip('/'),'count':len(entries),'bytes':sum(e['size'] for e in entries),'files':entries}
+def read_checked(folder,entry):
+ full=os.path.join(media_path(folder),*entry['path'].split('/'))
+ if os.path.islink(full):raise Problem(409,'folder_changed','Files changed after you were asked. Ask your Wizard to try again.')
+ with open(full,'rb') as stream:data=stream.read(entry['size']+1)
+ if len(data)!=entry['size'] or hashlib.sha256(data).hexdigest()!=entry['sha256']:raise Problem(409,'folder_changed','Files changed after you were asked. Ask your Wizard to try again.')
+ return data
+def notify_owner(text):
+ # Best effort: ping the owner through the Notifications app when installed. Never blocks or fails the change.
+ parsed=urllib.parse.urlsplit(NOTIFY_URL)
+ if parsed.scheme!='http' or parsed.username or parsed.password or not parsed.hostname:return
+ link=next((o for o in sorted(TRUSTED_ORIGINS) if o.startswith('https://')),'')
+ args={'title':'Cloudflare','message':f'Your Wizard wants to {text}. Open Cloudflare to approve.'[:400],'priority':'default'}
+ if link:args['link']=link+'/wizard-os-home/?open=wizard-cloudflare'
+ body=canon({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'notify','arguments':args}}).encode()
+ def send():
+  try:
+   request=urllib.request.Request(NOTIFY_URL,data=body,method='POST',headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream','User-Agent':f'{APP_ID}/{VERSION}'})
+   with urllib.request.build_opener(NoRedirect()).open(request,timeout=4) as response:response.read(65536)
+  except Exception:pass
+ threading.Thread(target=send,daemon=True).start()
 
 CONNECTION_LOCKS={}; GRANT_LOCKS={}; LOCK_MAP_GUARD=threading.Lock()
 def keyed_lock(mapping,key):
@@ -197,13 +267,13 @@ class Service:
    if key not in known:self.secrets.delete(key)
  def list_connections(self):
   with db() as conn:
-   rows=conn.execute('SELECT id,name,kind,status,revision,created,updated FROM connections ORDER BY created,id').fetchall(); values=[]
+   rows=conn.execute('SELECT id,name,kind,status,revision,created,updated,scopes FROM connections ORDER BY created,id').fetchall(); values=[]
    for row in rows:
-    item=dict(row); stored=conn.execute('SELECT account_inventory FROM connections WHERE id=?',(row['id'],)).fetchone()['account_inventory']
+    item=dict(row); item['scopes']=sorted(self.scopes_of(row) or []); item['can_change']=row['status']=='connected' and self.can_change(row); stored=conn.execute('SELECT account_inventory FROM connections WHERE id=?',(row['id'],)).fetchone()['account_inventory']
     try:item['account_inventory']=json.loads(stored)
     except (TypeError,json.JSONDecodeError):item['account_inventory']={'bounded':True,'complete':False,'is_truncated':None}
     item['accounts']=[dict(a) for a in conn.execute('SELECT account_id AS id,name FROM connection_accounts WHERE connection_id=? ORDER BY name,account_id',(row['id'],))]; values.append(item)
-  return {'contract':'wizard.cloudflare-connection/1','provider':'cloudflare','connections':values,'oauth_configured':self.oauth_configured(),'token_fallback':not self.oauth_configured(),'writes_allowed':self.writes_allowed,'registrar_registration_enabled':False}
+  return {'contract':'wizard.cloudflare-connection/1','provider':'cloudflare','connections':values,'oauth_configured':self.oauth_configured(),'token_fallback':not self.oauth_configured(),'writes_allowed':self.writes_allowed,'registrar_registration_enabled':False,'actions':sorted(ACTION_SCOPES),'sign_in':'/wizard-os-home/?open=wizard-cloudflare'}
  def connection(self,connection_id,allow_disconnected=False):
   safe_id(connection_id,'connection id')
   with db() as conn:row=conn.execute('SELECT * FROM connections WHERE id=?',(connection_id,)).fetchone()
@@ -295,6 +365,8 @@ class Service:
    accounts,inventory=self._verify_accounts(access); expires=token_response.get('expires_in',3600)
    label=flow['name'] or email or (accounts[0]['name'][:80] if accounts else '') or 'Cloudflare'
    if not isinstance(expires,int) or not 60<=expires<=31536000:expires=3600
+   granted=token_response.get('scope') if isinstance(token_response.get('scope'),str) and token_response.get('scope').strip() else cfg['scope']
+   granted=' '.join(sorted({x for x in granted.split() if SAFE_ID.fullmatch(x)}))
    secret={'access_token':access,'expires_at':stamp+expires}
    if isinstance(token_response.get('refresh_token'),str) and token_response['refresh_token']:secret['refresh_token']=token_response['refresh_token']
    connection_id=secrets.token_hex(12); self.secrets.put(connection_id,secret)
@@ -304,16 +376,36 @@ class Service:
      conn.execute('BEGIN IMMEDIATE'); current=conn.execute('SELECT status,session_hash,session_generation,global_generation,expires FROM oauth_flows WHERE state_hash=?',(state_hash,)).fetchone(); current_session=conn.execute('SELECT generation,expires FROM sessions WHERE cookie_hash=?',(session_hash,)).fetchone()
      valid=current and current['status']=='exchanging' and current['expires']>now() and current['session_hash']==session_hash and current_session and current_session['expires']>now() and current['session_generation']==current_session['generation'] and current['global_generation']==self._global_generation(conn)
      if not valid:raise Problem(400,'oauth_flow_invalid','OAuth flow was cancelled or became stale during exchange.')
-     conn.execute("INSERT INTO connections(id,name,kind,status,revision,created,updated,account_inventory) VALUES(?,?,?,'connected',1,?,?,?)",(connection_id,label,'oauth',stamp,stamp,canon(inventory))); conn.executemany('INSERT INTO connection_accounts VALUES(?,?,?)',[(connection_id,a['id'],a['name']) for a in accounts]); changed=conn.execute("UPDATE oauth_flows SET status='completed',connection_id=? WHERE state_hash=? AND status='exchanging'",(connection_id,state_hash)).rowcount
+     conn.execute("INSERT INTO connections(id,name,kind,status,revision,created,updated,account_inventory,scopes) VALUES(?,?,?,'connected',1,?,?,?,?)",(connection_id,label,'oauth',stamp,stamp,canon(inventory),granted)); conn.executemany('INSERT INTO connection_accounts VALUES(?,?,?)',[(connection_id,a['id'],a['name']) for a in accounts]); changed=conn.execute("UPDATE oauth_flows SET status='completed',connection_id=? WHERE state_hash=? AND status='exchanging'",(connection_id,state_hash)).rowcount
      if changed!=1:raise Problem(400,'oauth_flow_invalid','OAuth flow was cancelled or became stale during exchange.')
      conn.commit()
-    connected={'id':connection_id,'name':label,'kind':'oauth','status':'connected','revision':1,'accounts':accounts,'account_inventory':inventory}
+    connected={'id':connection_id,'name':label,'kind':'oauth','status':'connected','revision':1,'accounts':accounts,'account_inventory':inventory,'scopes':granted.split()}
    except Exception:
     self.secrets.delete(connection_id); raise
   except Exception:
    with db() as conn:conn.execute("UPDATE oauth_flows SET status='failed' WHERE state_hash=? AND status='exchanging'",(state_hash,))
    raise
+  self._retire_replaced(connection_id,{a['id'] for a in accounts})
   return connected
+ def _retire_replaced(self,keep,accounts):
+  # Signing in again (e.g. to allow changes) replaces an older sign-in covering the same accounts.
+  with db() as conn:
+   rows=conn.execute("SELECT id FROM connections WHERE kind='oauth' AND status='connected' AND id!=?",(keep,)).fetchall()
+   old=[r['id'] for r in rows if {a['account_id'] for a in conn.execute('SELECT account_id FROM connection_accounts WHERE connection_id=?',(r['id'],))}<=accounts]
+  for connection_id in old:
+   with keyed_lock(CONNECTION_LOCKS,connection_id):
+    with db() as conn:
+     conn.execute("UPDATE connections SET status='replaced',revision=revision+1,updated=? WHERE id=? AND status='connected'",(now(),connection_id)); conn.execute("UPDATE approvals SET status='disconnected',updated=? WHERE connection_id=? AND status IN ('pending','pending_review')",(now(),connection_id))
+    self.secrets.delete(connection_id)
+ @staticmethod
+ def scopes_of(connection):
+  value=connection['scopes'] if 'scopes' in connection.keys() else None
+  return set(value.split()) if isinstance(value,str) else None
+ def can_change(self,connection,action=None):
+  if not self.writes_allowed:return False
+  if connection['kind']=='token':return True  # scoped API tokens: Cloudflare enforces their own permissions
+  granted=self.scopes_of(connection) or set()
+  return (ACTION_SCOPES.get(action) in granted) if action else set(WRITE_SCOPES)<=granted
  def _linked(self,connection_id,account):
   connection=self.connection(connection_id); account=account_id(account)
   with db() as conn:linked=conn.execute('SELECT 1 FROM connection_accounts WHERE connection_id=? AND account_id=?',(connection_id,account)).fetchone()
@@ -335,6 +427,48 @@ class Service:
   expires=response.get('expires_in',3600)
   if not isinstance(expires,int) or not 60<=expires<=31536000:expires=3600
   self.secrets.put(connection['id'],{'access_token':access,'refresh_token':rotated,'expires_at':now()+expires}); return access
+ def headers_for(self,connection_id,account):
+  # Take the connection lock only to read (or once refresh) the token, so reads for many accounts run in parallel.
+  with keyed_lock(CONNECTION_LOCKS,safe_id(connection_id,'connection id')):
+   connection=self._linked(connection_id,account); return connection,{'Authorization':'Bearer '+self._access_locked(connection)}
+ def metrics(self,connection_id,account,fresh=False):
+  account=account_id(account); key=(safe_id(connection_id,'connection id'),account)
+  with keyed_lock(METRIC_LOCKS,key):
+   cached=METRICS.get(key)
+   if cached and not fresh and cached[0]>time.monotonic():return cached[1]
+   connection,headers=self.headers_for(connection_id,account)
+   def count(url,list_key=None):
+    _,response=self.transport.request('GET',url,headers); result=response['result']
+    if list_key:result=result.get(list_key) if isinstance(result,dict) else None
+    info=response.get('result_info') or (response['result'].get('result_info') if isinstance(response.get('result'),dict) else None) or {}
+    total=info.get('total_count') if isinstance(info,dict) else None
+    if type(total) is int and total>=0:return total
+    if not isinstance(result,list):raise Problem(502,'provider_malformed','Cloudflare returned a malformed list.')
+    return len(result)
+   def stored():
+    _,response=self.transport.request('GET',f'{API}/accounts/{account}/r2/metrics',headers); result=response['result'] if isinstance(response.get('result'),dict) else {}
+    size=objects=0
+    for tier in result.values():
+     for state in ((tier or {}).get('published'),) if isinstance(tier,dict) else ():
+      if isinstance(state,dict):size+=int(state.get('payloadSize') or 0)+int(state.get('metadataSize') or 0); objects+=int(state.get('objects') or 0)
+    return {'bytes':size,'objects':objects}
+   jobs={'websites':lambda:count(f'{API}/accounts/{account}/workers/scripts'),
+         'buckets':lambda:count(f'{API}/accounts/{account}/r2/buckets?per_page=1','buckets'),
+         'storage':stored,
+         'domains':lambda:count(f'{API}/zones?'+urllib.parse.urlencode({'account.id':account,'per_page':1}))}
+   out={'account_id':account,'connection_id':connection_id,'can_change':self.can_change(connection)}
+   with ThreadPoolExecutor(max_workers=4) as pool:futures={name:pool.submit(job) for name,job in jobs.items()}
+   for name,future in futures.items():
+    try:out[name]=future.result()
+    except Problem as error:out[name]=None; out.setdefault('unavailable',{})[name]=error.code
+   failed=bool(out.get('unavailable')); out['fetched']=now()
+   METRICS[key]=(time.monotonic()+(METRIC_FAIL_TTL if failed else METRIC_TTL),out); return out
+ def metrics_all(self,fresh=False):
+  pairs=[(c['id'],a['id']) for c in self.list_connections()['connections'] if c['status']=='connected' for a in c['accounts']]
+  def one(pair):
+   try:return self.metrics(*pair,fresh=fresh)
+   except Problem as error:return {'connection_id':pair[0],'account_id':pair[1],'error':error.code}
+  with ThreadPoolExecutor(max_workers=6) as pool:return {'accounts':list(pool.map(one,pairs))}
  @contextmanager
  def authorized(self,connection_id,account):
   lock=keyed_lock(CONNECTION_LOCKS,safe_id(connection_id,'connection id'))
@@ -470,6 +604,12 @@ class Service:
   elif action=='workers.deploy':
    self._exact(payload,['script','main_module','code']); safe_id(payload['script'],'script'); bounded_text(payload['main_module'],'main module',128); bounded_text(payload['code'],'Worker code',MAX_OBJECT)
    if payload['main_module'] not in ('worker.js','index.js','worker.mjs','index.mjs'):raise Problem(400,'invalid_payload','Main module filename is not allowed.')
+  elif action=='site.publish':
+   self._exact(payload,['script','folder'],['single_page']); worker_name(payload['script']); media_path(payload['folder'])
+   if 'single_page' in payload and type(payload['single_page']) is not bool:raise Problem(400,'invalid_payload','Invalid single_page flag.')
+  elif action=='r2.backup':
+   self._exact(payload,['bucket','folder'],['prefix']); safe_id(payload['bucket'],'bucket'); media_path(payload['folder'])
+   if 'prefix' in payload and (not isinstance(payload['prefix'],str) or len(payload['prefix'])>200 or '..' in payload['prefix'] or payload['prefix'].startswith('/')):raise Problem(400,'invalid_payload','Invalid prefix.')
   elif action=='registrar.register':
    self._exact(payload,['domain_name','years','privacy_mode','acknowledgements'])
    if not isinstance(payload['domain_name'],str) or not DOMAIN.fullmatch(payload['domain_name']) or type(payload['years']) is not int or not 1<=payload['years']<=10 or not isinstance(payload['privacy_mode'],str) or not 1<=len(payload['privacy_mode'])<=64 or not isinstance(payload['acknowledgements'],list) or not payload['acknowledgements'] or any(not isinstance(x,str) or not 1<=len(x)<=200 for x in payload['acknowledgements']):raise Problem(400,'invalid_payload','Invalid registration payload.')
@@ -484,15 +624,35 @@ class Service:
    if not isinstance(result,dict) or result.get('id')!=payload['record_id'] or result.get('zone_id') not in (None,payload['zone_id']):raise Problem(403,'record_zone_mismatch','DNS record does not belong to the selected zone.')
  def prepare(self,connection_id,account,action,payload,session_hash=None,source='ui'):
   account=account_id(account); raw=self.validate_action(action,payload)
+  if action=='registrar.register':raise Problem(409,'registration_blocked','Buying domains is not available. Show the owner the price and let them buy it on Cloudflare.')
+  if not self.writes_allowed:raise Problem(403,'writes_disabled','Changes are switched off on this box.')
+  connection=self.connection(connection_id)
+  if not self.can_change(connection,action):raise Problem(409,'sign_in_again','This sign-in cannot make changes. Ask the owner to open the Cloudflare app (/wizard-os-home/?open=wizard-cloudflare) and tap Sign in again.')
+  manifest=None
+  if action=='site.publish':manifest=scan_folder(payload['folder'],SITE_LIMITS)
+  if action=='r2.backup':manifest=scan_folder(payload['folder'],BACKUP_LIMITS)
   with self.authorized(connection_id,account) as (connection,headers):
    if action.startswith('dns.'):self._verify_dns_binding(headers,account,action,payload)
+   if action=='site.publish':
+    try:self.transport.request('GET',f"{API}/accounts/{account}/workers/scripts/{payload['script']}/settings",headers); manifest['replaces']=True
+    except Problem as error:
+     if error.code!='provider_not_found':raise
+     manifest['replaces']=False
    approval_id=secrets.token_hex(16); stamp=now(); status='pending' if source=='ui' and session_hash else 'pending_review'
-   with db() as conn:conn.execute('INSERT INTO approvals(id,connection_id,account_id,action,payload,payload_digest,revision,status,source,session_hash,expires,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(approval_id,connection_id,account,action,raw,sha(raw),connection['revision'],status,source,session_hash if status=='pending' else None,stamp+APPROVAL_TTL,stamp,stamp))
-  return self.approval(approval_id,True)
+   digest=sha(raw if manifest is None else canon({'payload':json.loads(raw),'manifest':manifest}))
+   ttl=APPROVAL_TTL if source=='ui' else MCP_APPROVAL_TTL
+   with db() as conn:conn.execute('INSERT INTO approvals(id,connection_id,account_id,action,payload,payload_digest,revision,status,source,session_hash,expires,created,updated,manifest) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(approval_id,connection_id,account,action,raw,digest,connection['revision'],status,source,session_hash if status=='pending' else None,stamp+ttl,stamp,stamp,None if manifest is None else canon(manifest)))
+  out=self.approval(approval_id,True)
+  if source=='mcp':
+   notify_owner(self.describe(action,payload,manifest)); out['next']='The owner must tap Approve in the Cloudflare app (/wizard-os-home/?open=wizard-cloudflare). Tell them in one sentence, then check cloudflare_approval_status.'
+  return out
  @staticmethod
- def describe(action,payload):
+ def describe(action,payload,manifest=None):
   # Plain words for the owner's one-line approval card; exact payload stays behind Details.
-  p=payload if isinstance(payload,dict) else {}
+  p=payload if isinstance(payload,dict) else {}; m=manifest or {}
+  files=f" ({m.get('count',0)} files, {human_size(m.get('bytes',0))})" if m else ''
+  if action=='site.publish':return f"{'update' if m.get('replaces') else 'publish'} the website {p.get('script','')} from {p.get('folder','')}{files}"
+  if action=='r2.backup':return f"back up {p.get('folder','')} to {p.get('bucket','')}{files}"
   if action=='dns.create':return f"add a DNS record {p.get('type','')} {p.get('name','')} → {p.get('content','')}"
   if action=='dns.update':return f"change the DNS record {p.get('type','')} {p.get('name','')} → {p.get('content','')}"
   if action=='r2.bucket.create':return f"create the storage bucket {p.get('name','')}"
@@ -505,10 +665,13 @@ class Service:
   listing=self.list_connections(); flows=self.oauth_status(session_hash)['flows']; flow=flows[0] if flows else None
   with db() as conn:
    self._expire_approvals(conn); rows=conn.execute("SELECT * FROM approvals WHERE status IN ('pending','pending_review') ORDER BY created DESC LIMIT 20").fetchall()
-  waiting=[{'id':r['id'],'connection_id':r['connection_id'],'account_id':r['account_id'],'action':r['action'],'status':r['status'],'text':self.describe(r['action'],json.loads(r['payload'])),'payload':json.loads(r['payload']),'payload_digest':r['payload_digest'],'expires':r['expires']} for r in rows]
+   recent=conn.execute("SELECT * FROM approvals WHERE status IN ('executing','succeeded','manual_review') AND updated>? ORDER BY updated DESC LIMIT 3",(now()-600,)).fetchall()
+  card=lambda r:{'id':r['id'],'connection_id':r['connection_id'],'account_id':r['account_id'],'action':r['action'],'status':r['status'],'text':self.describe(r['action'],json.loads(r['payload']),json.loads(r['manifest']) if r['manifest'] else None),'payload':json.loads(r['payload']),'payload_digest':r['payload_digest'],'expires':r['expires'],'result':json.loads(r['result']) if r['result'] else None}
+  waiting=[card(r) for r in rows]; done=[card(r) for r in recent]
   return {'connections':[{'id':c['id'],'name':c['name'],'status':c['status'],'accounts':c['accounts']} for c in listing['connections'] if c['status']=='connected'],
           'signin':{'available':listing['oauth_configured'],'status':flow['status'] if flow else None,'expires':flow['expires'] if flow else None},
-          'approvals':waiting,'writes_allowed':self.writes_allowed}
+          'approvals':waiting,'recent':done,'writes_allowed':self.writes_allowed,
+          'can_change':{c['id']:c['can_change'] for c in listing['connections'] if c['status']=='connected'}}
  def _expire_approvals(self,conn):conn.execute("UPDATE approvals SET status='expired',updated=? WHERE status IN ('pending','pending_review') AND expires<=?",(now(),now()))
  def approvals(self):
   with db() as conn:
@@ -520,6 +683,8 @@ class Service:
   if not row:raise Problem(404,'approval_not_found','Approval not found.')
   result={key:row[key] for key in ('id','connection_id','account_id','action','payload_digest','revision','status','source','expires','created','updated')}
   if include_payload:result['payload']=json.loads(row['payload'])
+  if row['result']:result['result']=json.loads(row['result'])
+  if row['manifest']:m=json.loads(row['manifest']); result['files']={'count':m.get('count'),'bytes':m.get('bytes'),'replaces':m.get('replaces')}
   return result
  def review(self,approval_id,session_hash):
   with db() as conn:
@@ -547,17 +712,58 @@ class Service:
     if not approval['session_hash'] or not hmac.compare_digest(approval['session_hash'],session_hash) or not isinstance(digest,str) or not hmac.compare_digest(approval['payload_digest'],digest):raise Problem(403,'approval_mismatch','Approval owner or digest did not match.')
     connection=conn.execute('SELECT * FROM connections WHERE id=?',(approval['connection_id'],)).fetchone()
     if not connection or connection['status']!='connected' or connection['revision']!=approval['revision']:raise Problem(409,'stale_approval','Connection changed after preparation.')
-    if approval['action']=='registrar.register':raise Problem(409,'registration_blocked','Registration is blocked because the API cannot enforce a maximum price with required billing, contact, agreement, and fresh quote state.')
+    if approval['action']=='registrar.register' or approval['action'] not in ACTION_SCOPES:raise Problem(409,'registration_blocked','Registration is blocked because the API cannot enforce a maximum price with required billing, contact, agreement, and fresh quote state.')
+    if not self.can_change(connection,approval['action']):raise Problem(409,'sign_in_again','Sign in again to let your Wizard make changes.')
     conn.execute("UPDATE approvals SET status='executing',updated=? WHERE id=?",(now(),approval_id)); conn.commit()
-   payload=json.loads(approval['payload']); headers={'Authorization':'Bearer '+self._access_locked(dict(connection))}
+   payload=json.loads(approval['payload']); manifest=json.loads(approval['manifest']) if approval['manifest'] else None
    try:
+    headers={'Authorization':'Bearer '+self._access_locked(dict(connection))}
     if approval['action'].startswith('dns.'):self._verify_dns_binding(headers,approval['account_id'],approval['action'],payload)
-    method,url,body,body_kind,extra=self._write_request(approval,payload); headers.update(extra); _,response=self.transport.request(method,url,headers,body,body_kind=body_kind)
-   except Exception:
-    with db() as conn:conn.execute("UPDATE approvals SET status='manual_review',updated=? WHERE id=? AND status='executing'",(now(),approval_id))
+    if approval['action']=='site.publish':result=self._publish_site(approval['account_id'],payload,manifest,headers)
+    elif approval['action']=='r2.backup':result=self._backup(approval['account_id'],payload,manifest,headers)
+    else:
+     method,url,body,body_kind,extra=self._write_request(approval,payload); headers.update(extra); _,response=self.transport.request(method,url,headers,body,body_kind=body_kind); result=response['result']
+   except Exception as error:
+    with db() as conn:conn.execute("UPDATE approvals SET status=?,updated=? WHERE id=? AND status='executing'",('failed' if isinstance(error,Problem) and error.code=='folder_changed' else 'manual_review',now(),approval_id))
     raise
-   with db() as conn:conn.execute("UPDATE approvals SET status='succeeded',updated=? WHERE id=? AND status='executing'",(now(),approval_id))
-   return {'id':approval_id,'status':'succeeded','result':response['result']}
+   summary=result if approval['action'] in ('site.publish','r2.backup') else {'ok':True}
+   with db() as conn:conn.execute("UPDATE approvals SET status='succeeded',result=?,updated=? WHERE id=? AND status='executing'",(canon(summary),now(),approval_id))
+   return {'id':approval_id,'status':'succeeded','result':result}
+ def _publish_site(self,account,payload,manifest,headers):
+  # Workers static assets: upload session -> bucketed uploads -> script with an ASSETS binding -> workers.dev on.
+  folder,script=payload['folder'],payload['script']; by_hash={}; listing={}
+  for entry in manifest['files']:
+   data=read_checked(folder,entry); ext=os.path.splitext(entry['path'])[1].lstrip('.')
+   asset_hash=hashlib.sha256(base64.b64encode(data)+ext.encode()).hexdigest()[:32]; by_hash[asset_hash]=(entry['path'],data); listing['/'+entry['path']]={'hash':asset_hash,'size':len(data)}
+  base=f"{API}/accounts/{account}/workers/scripts/{script}"
+  _,session=self.transport.request('POST',base+'/assets-upload-session',headers,{'manifest':listing},timeout=30); result=session['result'] if isinstance(session.get('result'),dict) else {}
+  token=result.get('jwt'); buckets=result.get('buckets') or []
+  if not isinstance(token,str) or not token:raise Problem(502,'provider_malformed','Cloudflare did not start the upload.')
+  for bucket in buckets:
+   fields={}
+   for asset_hash in bucket:
+    if asset_hash not in by_hash:raise Problem(502,'provider_malformed','Cloudflare asked for an unknown file.')
+    path,data=by_hash[asset_hash]; fields[asset_hash]=(asset_hash,mimetypes.guess_type(path)[0] or 'application/octet-stream',base64.b64encode(data))
+   _,uploaded=self.transport.request('POST',f'{API}/accounts/{account}/workers/assets/upload?base64=true',{'Authorization':'Bearer '+token},{'fields':{},'files':fields},body_kind='multipart',timeout=120)
+   if isinstance(uploaded.get('result'),dict) and isinstance(uploaded['result'].get('jwt'),str):token=uploaded['result']['jwt']
+  config={'html_handling':'auto-trailing-slash','not_found_handling':'single-page-application' if payload.get('single_page') else '404-page'}
+  metadata={'main_module':'worker.js','compatibility_date':'2026-10-01','assets':{'jwt':token,'config':config},'bindings':[{'type':'assets','name':'ASSETS'}]}
+  multipart={'fields':{'metadata':('application/json',canon(metadata).encode())},'files':{'worker.js':('worker.js','application/javascript+module',WORKER_SHIM.encode())}}
+  self.transport.request('PUT',base,headers,multipart,body_kind='multipart',timeout=60)
+  self.transport.request('POST',base+'/subdomain',headers,{'enabled':True,'previews_enabled':False},timeout=30)
+  address=None
+  try:
+   _,sub=self.transport.request('GET',f'{API}/accounts/{account}/workers/subdomain',headers); name=(sub.get('result') or {}).get('subdomain')
+   if isinstance(name,str) and WORKER_NAME.fullmatch(name):address=f'https://{script}.{name}.workers.dev'
+  except Problem:pass
+  return {'website':script,'files':manifest['count'],'bytes':manifest['bytes'],'url':address}
+ def _backup(self,account,payload,manifest,headers):
+  prefix=(payload.get('prefix') or time.strftime('%Y-%m-%d',time.gmtime())+'/'+manifest['folder'].split('/')[-1]).strip('/'); uploaded=0
+  for entry in manifest['files']:
+   data=read_checked(payload['folder'],entry); key=f"{prefix}/{entry['path']}"
+   url=f"{API}/accounts/{account}/r2/buckets/{urllib.parse.quote(payload['bucket'],safe='')}/objects/{urllib.parse.quote(key,safe='')}"
+   self.transport.request('PUT',url,dict(headers,**{'Content-Type':mimetypes.guess_type(entry['path'])[0] or 'application/octet-stream'}),data,body_kind='raw',timeout=120,require_result=False); uploaded+=1
+  return {'bucket':payload['bucket'],'prefix':prefix,'files':uploaded,'bytes':manifest['bytes']}
  def _write_request(self,approval,payload):
   account=approval['account_id']; action=approval['action']
   if action=='dns.create':return 'POST',f"{API}/zones/{payload['zone_id']}/dns_records",{k:v for k,v in payload.items() if k!='zone_id'},'json',{}
@@ -626,7 +832,8 @@ TOOLS=[
  {'name':'cloudflare_resources_read','description':'Read a bounded exact-account section. R2 objects require bucket; metadata also key; Worker detail requires script; DNS requires zone. Use page for Workers/zones/DNS and cursor for R2/registrations. Billing returns a dashboard link, not an invented billing API.','annotations':{'readOnlyHint':True},'inputSchema':{'type':'object','required':['connection_id','account_id','section'],'properties':{'connection_id':{'type':'string'},'account_id':{'type':'string'},'section':{'type':'string','enum':['account','billing','r2','r2_objects','r2_metadata','workers','worker','zones','dns','registrations']},'bucket':{'type':'string'},'key':{'type':'string'},'script':{'type':'string'},'zone':{'type':'string'},'prefix':{'type':'string'},'cursor':{'type':'string'},'page':{'type':'integer','minimum':1},'per_page':{'type':'integer','minimum':1,'maximum':100}}}},
  {'name':'cloudflare_registrar_search','description':'Read-only Registrar beta suggestions. Search is advisory, not availability proof. Never reserves or buys a domain.','annotations':{'readOnlyHint':True},'inputSchema':{'type':'object','required':['connection_id','account_id','q'],'properties':{'connection_id':{'type':'string'},'account_id':{'type':'string'},'q':{'type':'string'}}}},
  {'name':'cloudflare_registrar_check','description':'Read-only real-time Registrar beta availability/pricing for 1..20 domains. POST only queries availability; it never registers, reserves, or charges. Registration is blocked in this candidate.','annotations':{'readOnlyHint':True},'inputSchema':{'type':'object','required':['connection_id','account_id','domains'],'properties':{'connection_id':{'type':'string'},'account_id':{'type':'string'},'domains':{'type':'array','minItems':1,'maxItems':20,'items':{'type':'string'}}}}},
- {'name':'cloudflare_action_prepare','description':'Prepare an exact action for later owner review; never confirms.','inputSchema':{'type':'object','required':['connection_id','account_id','action','payload'],'properties':{'connection_id':{'type':'string'},'account_id':{'type':'string'},'action':{'type':'string'},'payload':{'type':'object'}}}},
+ {'name':'cloudflare_overview','description':'At-a-glance numbers per account: websites (Workers), storage buckets and bytes stored, domains, and whether this sign-in can make changes.','annotations':{'readOnlyHint':True},'inputSchema':{'type':'object','properties':{}}},
+ {'name':'cloudflare_action_prepare','description':'Ask the owner to approve one change; never runs it. The owner taps Approve in the Cloudflare app. Actions and payloads: site.publish {script, folder, single_page?} publishes a Files folder (index.html at its root) as a website at https://<script>.<subdomain>.workers.dev; r2.backup {bucket, folder, prefix?} copies a Files folder into a bucket; r2.bucket.create {name}; r2.object.put {bucket, key, content_base64, content_type?}; dns.create {zone_id, type, name, content, ttl?, proxied?}; dns.update {+record_id}; workers.deploy {script, main_module, code}. Deletes and domain purchases are not possible.','inputSchema':{'type':'object','required':['connection_id','account_id','action','payload'],'properties':{'connection_id':{'type':'string'},'account_id':{'type':'string'},'action':{'type':'string','enum':sorted(ACTION_SCOPES)},'payload':{'type':'object'}}}},
  {'name':'cloudflare_approval_status','description':'Read durable approval status and digest.','inputSchema':{'type':'object','required':['id'],'properties':{'id':{'type':'string'}}}},
  {'name':'cloudflare_approval_cancel','description':'Cancel a pending approval.','inputSchema':{'type':'object','required':['id'],'properties':{'id':{'type':'string'}}}},
 ]
@@ -648,6 +855,7 @@ def rpc(message,service=None):
    elif name=='cloudflare_resources_read':value=service.read_resource(args.get('connection_id'),args.get('account_id'),args.get('section'),args)
    elif name=='cloudflare_registrar_search':value=service.registrar_search(args.get('connection_id'),args.get('account_id'),args.get('q'))
    elif name=='cloudflare_registrar_check':value=service.registrar_check(args.get('connection_id'),args.get('account_id'),args.get('domains'))
+   elif name=='cloudflare_overview':value=service.metrics_all()
    elif name=='cloudflare_action_prepare':value=service.prepare(args.get('connection_id'),args.get('account_id'),args.get('action'),args.get('payload'),source='mcp')
    elif name=='cloudflare_approval_status':value=service.approval(args.get('id'))
    elif name=='cloudflare_approval_cancel':value=service.cancel(args.get('id'))
@@ -788,6 +996,8 @@ class Handler(BaseHTTPRequestHandler):
     session=self.browser_read(); query=self.query(url)
     if path=='/api/connections':output=SERVICE.list_connections()
     elif path=='/api/home':output=SERVICE.home(session)
+    elif path=='/api/metrics' and query.get('account_id'):output=SERVICE.metrics(query.get('connection_id'),query.get('account_id'),query.get('fresh')=='1')
+    elif path=='/api/metrics':output=SERVICE.metrics_all(query.get('fresh')=='1')
     elif path=='/api/oauth/status':output=SERVICE.oauth_status(session)
     elif path=='/api/approvals':output=SERVICE.approvals()
     elif path.startswith('/api/approvals/'):output=SERVICE.approval(path.split('/')[3],True)

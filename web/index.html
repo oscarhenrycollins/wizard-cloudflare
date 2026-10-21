@@ -1,11 +1,18 @@
 <!doctype html>
 <html lang="en" data-app="wizard-cloudflare"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>Cloudflare</title><script src="boot.js"></script><link rel="stylesheet" href="wizard-ui.css"><link rel="stylesheet" href="styles.css"><script defer src="theme-client.js"></script><script defer src="app.js"></script></head>
 <body><div class="wz-app"><header class="wz-head"><h1 id="title">Cloudflare</h1></header><main class="wz-scroll">
-<section id="approvals" class="wz-sec" hidden></section>
-<section id="home" class="wz-sec">
- <div id="signed-out" hidden><p class="line" id="line">Not connected</p><button id="signin" class="action primary" type="button">Sign in with Cloudflare</button></div>
- <div id="waiting" hidden><p class="line">Waiting for Cloudflare…</p><button id="cancel" class="action" type="button">Cancel</button></div>
- <div id="signed-in" hidden><div id="accounts" class="wz-list"></div><div class="foot"><button id="add" class="link" type="button">+ Add account</button><span id="logins"></span></div></div>
+<section id="approvals" hidden></section>
+<section id="signed-out" class="hero" hidden>
+ <div class="mark" aria-hidden="true"></div>
+ <p class="line" id="line">Not connected</p>
+ <button id="signin" class="action primary wide" type="button">Sign in with Cloudflare</button>
+ <p class="hint" id="new-hint">No account? <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener noreferrer">Sign up free</a>, then sign in.</p>
 </section>
-<section id="account" class="wz-sec" hidden><div id="account-body"></div></section>
+<section id="waiting" class="hero" hidden><div class="mark" aria-hidden="true"></div><p class="line">Waiting for Cloudflare…</p><button id="cancel" class="action wide" type="button">Cancel</button></section>
+<section id="signed-in" hidden>
+ <div id="reauth" class="reauth" hidden><p>Sign in again to let your Wizard make changes</p><button id="reauth-btn" class="action primary" type="button">Sign in</button></div>
+ <div id="accounts" class="cards"></div>
+ <div class="ask-wiz"><p class="sec">Ask your Wizard</p><div id="prompts" class="prompts"></div></div>
+ <div class="foot"><button id="add" class="link" type="button">+ Add account</button><span id="logins"></span></div>
+</section>
 </main><p id="status" class="wz-status" role="status" aria-live="polite"></p></div></body></html>

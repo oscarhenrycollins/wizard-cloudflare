@@ -1,17 +1,17 @@
 'use strict';
-// Cloudflare, as plain as possible: sign in, pick an account, look at Storage / Workers / Domains.
-// Approvals appear only when Oscar has prepared something. Secrets never reach this page.
+// Cloudflare, connect-only: sign in here; your Wizard does the rest. A small at-a-glance card per account.
+// Approvals appear only when your Wizard has prepared a change. Secrets never reach this page.
 const $ = id => document.getElementById(id);
-let csrf = '', home = null, popup = null, timer = null, stack = [], seq = 0, busy = false;
+const PROMPTS = ['Publish my website', 'Back up my files', 'Find a domain'];
+let csrf = '', home = null, popup = null, timer = null, busy = false;
+const metrics = new Map();
 
 function el(tag, text, cls) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = String(text); return n; }
 function btn(text, fn, cls) { const n = el('button', text, cls); n.type = 'button'; n.addEventListener('click', fn); return n; }
 function say(text) { $('status').textContent = text || ''; }
-function row(title, sub, fn) {
-  const n = fn ? btn('', fn, 'wz-row') : el('div', undefined, 'wz-row');
-  const main = el('span', undefined, 'wz-main'); main.append(el('b', title)); if (sub) main.append(el('small', sub));
-  n.append(main); if (fn) n.append(el('span', '›', 'chev')); return n;
-}
+const SVG = 'http://www.w3.org/2000/svg';
+const ICONS = { websites: 'M3 5h18v14H3zM3 9h18M7 7h.01M10 7h.01', storage: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3', domains: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z' };
+function icon(name) { const s = document.createElementNS(SVG, 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true'); const p = document.createElementNS(SVG, 'path'); p.setAttribute('d', ICONS[name]); s.append(p); return s; }
 async function api(path, body) {
   const init = { credentials: 'same-origin', cache: 'no-store', headers: {} };
   if (body !== undefined) { init.method = 'POST'; init.headers['Content-Type'] = 'application/json'; init.headers['X-CSRF-Token'] = csrf; init.body = JSON.stringify(body); }
@@ -19,6 +19,7 @@ async function api(path, body) {
   if (!r.ok) throw Object.assign(Error(v.error?.message || 'Something went wrong.'), { code: v.error?.code });
   return v;
 }
+function size(n) { if (typeof n !== 'number') return ''; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; } return `${n < 10 && i ? n.toFixed(1) : Math.round(n)} ${u[i]}`; }
 
 // ---------- home ----------
 async function refresh() {
@@ -32,15 +33,56 @@ async function refresh() {
 }
 async function poll() { timer = null; try { await refresh(); } catch (_) { timer = setTimeout(poll, 3000); } }
 function renderHome(waiting) {
-  const connected = home.connections.length > 0, inAccount = stack.length > 0;
-  $('home').hidden = inAccount; $('account').hidden = !inAccount;
+  const connected = home.connections.length > 0;
   $('waiting').hidden = !waiting; $('signed-out').hidden = waiting || connected; $('signed-in').hidden = waiting || !connected;
   $('signin').disabled = !home.signin.available; $('line').textContent = home.signin.available ? 'Not connected' : 'Sign-in unavailable';
-  const list = $('accounts'); list.replaceChildren();
-  const many = home.connections.length > 1;
-  for (const c of home.connections) for (const a of c.accounts) list.append(row(a.name, many ? c.name : '', () => openAccount(c, a)));
+  $('reauth').hidden = !home.writes_allowed || !home.connections.some(c => home.can_change?.[c.id] === false);
+  const list = $('accounts'), many = home.connections.length > 1, keep = new Set();
+  list.replaceChildren();
+  for (const c of home.connections) for (const a of c.accounts) { const key = `${c.id}/${a.id}`; keep.add(key); list.append(card(c, a, key, many)); load(c, a, key); }
+  for (const key of metrics.keys()) if (!keep.has(key)) metrics.delete(key);
   const logins = $('logins'); logins.replaceChildren();
   for (const c of home.connections) logins.append(btn(many ? `Sign out ${c.name}` : 'Sign out', () => signOut(c), 'link quiet'));
+}
+function card(c, a, key, many) {
+  const box = el('article', undefined, 'acct'); box.dataset.key = key;
+  const head = el('div', undefined, 'acct-h'); head.append(el('h3', a.name)); if (many) head.append(el('small', c.name)); box.append(head);
+  const grid = el('div', undefined, 'stats');
+  for (const [name, label] of [['websites', 'Websites'], ['storage', 'Storage'], ['domains', 'Domains']]) {
+    const t = el('div', undefined, 'stat'); t.dataset.metric = name; t.append(icon(name));
+    const txt = el('span', undefined, 'stat-t'); txt.append(el('b', '…'), el('small', label)); t.append(txt); grid.append(t);
+  }
+  box.append(grid); paintCard(box, metrics.get(key)?.value); return box;
+}
+function paintCard(box, m) {
+  if (!box || !m) return;
+  const set = (name, big, small) => { const t = box.querySelector(`[data-metric="${name}"]`); if (!t) return; t.querySelector('b').textContent = big; t.querySelector('small').textContent = small; t.classList.toggle('none', big === '—'); };
+  const n = v => (typeof v === 'number' ? v : null), fail = m.error ? 'Unavailable' : null;
+  const w = n(m.websites), b = n(m.buckets), d = n(m.domains), bytes = m.storage?.bytes;
+  set('websites', w ? String(w) : '—', fail || (w === null ? 'Websites' : w ? (w === 1 ? 'Website' : 'Websites') : 'Not set up'));
+  set('storage', b ? (typeof bytes === 'number' ? size(bytes) : String(b)) : '—', fail || (b === null ? 'Storage' : b ? `${b} ${b === 1 ? 'bucket' : 'buckets'}` : 'Not set up'));
+  set('domains', d ? String(d) : '—', fail || (d === null ? 'Domains' : d ? (d === 1 ? 'Domain' : 'Domains') : 'Not set up'));
+}
+async function load(c, a, key) {
+  const have = metrics.get(key); if (have && (have.pending || Date.now() - have.at < 60000)) return;
+  metrics.set(key, { pending: true, at: Date.now(), value: have?.value });
+  let value;
+  try { value = await api(`api/metrics?${new URLSearchParams({ connection_id: c.id, account_id: a.id })}`); }
+  catch (e) { value = { error: e.code || 'unavailable' }; }
+  metrics.set(key, { at: Date.now(), value });
+  paintCard(document.querySelector(`.acct[data-key="${CSS.escape(key)}"]`), value);
+}
+function renderPrompts() {
+  const box = $('prompts'); box.replaceChildren();
+  for (const text of PROMPTS) box.append(btn(`“${text}”`, () => ask(text), 'prompt'));
+}
+async function ask(text) {
+  let shared = false;
+  try { if (window.WizardApp?.chat?.prompt) shared = await window.WizardApp.chat.prompt(text) === true; } catch (_) {}
+  if (!shared) {
+    try { await navigator.clipboard.writeText(text); say('Copied. Paste it in your Wizard chat.'); }
+    catch (_) { say(`Ask your Wizard: “${text}”`); }
+  }
 }
 async function signIn() {
   if (busy) return; busy = true; say('');
@@ -60,7 +102,7 @@ async function cancel() {
 }
 async function signOut(c) {
   if (!confirm(home.connections.length > 1 ? `Sign out ${c.name}?` : 'Sign out of Cloudflare?')) return;
-  try { await api(`api/connections/${c.id}/disconnect`, {}); stack = []; await refresh(); } catch (e) { say(e.message); }
+  try { await api(`api/connections/${c.id}/disconnect`, {}); await refresh(); } catch (e) { say(e.message); }
 }
 
 // ---------- approvals (only when something is waiting) ----------
@@ -68,7 +110,7 @@ function renderApprovals() {
   const box = $('approvals'); box.replaceChildren(); box.hidden = !home.approvals.length;
   for (const a of home.approvals) {
     const card = el('div', undefined, 'ask');
-    card.append(el('p', `Oscar wants to ${a.text}`, 'ask-text'));
+    card.append(el('p', `Your Wizard wants to ${a.text}`, 'ask-text'));
     const acts = el('div', undefined, 'ask-acts');
     acts.append(btn('Approve', () => decide(a, true), 'action primary'), btn('Decline', () => decide(a, false), 'action'));
     const more = el('details'); more.append(el('summary', 'Details'), el('pre', JSON.stringify(a.payload, null, 2)));
@@ -79,63 +121,22 @@ async function decide(a, yes) {
   try {
     if (!yes) { await api(`api/approvals/${a.id}/cancel`, {}); say('Declined.'); }
     else {
+      say('Working…');
       if (a.status === 'pending_review') await api(`api/approvals/${a.id}/review`, {});
-      await api(`api/approvals/${a.id}/confirm`, { payload_digest: a.payload_digest }); say('Done.');
+      const out = await api(`api/approvals/${a.id}/confirm`, { payload_digest: a.payload_digest });
+      say(out.result?.url ? `Done. Live at ${out.result.url}` : 'Done.');
+      metrics.clear();
     }
   } catch (e) { say(e.code === 'writes_disabled' ? 'Changes are switched off on this box.' : e.message); }
   await refresh();
 }
 
-// ---------- account → Storage / Workers / Domains ----------
-function show(view) { stack.push(view); say(''); paint(); }
-function back() { if (!stack.length) return false; stack.pop(); seq++; if (stack.length) paint(); else renderHome(false); return true; }
-function openAccount(c, a) { stack = []; show({ kind: 'account', c, a }); }
-function read(view, section, params = {}) {
-  const q = new URLSearchParams({ account_id: view.a.id, section, per_page: '50', ...params });
-  return api(`api/connections/${view.c.id}/resources?${q}`);
-}
-async function paint() {
-  const v = stack[stack.length - 1], body = $('account-body'), mine = ++seq;
-  $('home').hidden = true; $('account').hidden = false; body.replaceChildren();
-  const head = el('div', undefined, 'crumb'); head.append(btn('‹', back, 'back'), el('h2', v.title || v.a.name)); body.append(head);
-  const list = el('div', undefined, 'wz-list'); body.append(list);
-  if (v.kind === 'account') {
-    list.append(row('Storage', '', () => show({ ...v, kind: 'storage', title: 'Storage' })),
-      row('Workers', '', () => show({ ...v, kind: 'workers', title: 'Workers' })),
-      row('Domains', '', () => show({ ...v, kind: 'domains', title: 'Domains' })));
-    const bill = el('a', 'Billing ↗', 'link quiet'); bill.href = `https://dash.cloudflare.com/${v.a.id}/billing`; bill.target = '_blank'; bill.rel = 'noopener noreferrer';
-    const foot = el('div', undefined, 'foot'); foot.append(bill); body.append(foot); return;
-  }
-  if (v.kind === 'domains') {
-    const form = el('form', undefined, 'find'), input = el('input', undefined, 'wz-input');
-    input.type = 'search'; input.placeholder = 'Find a domain'; input.setAttribute('aria-label', 'Find a domain'); input.autocapitalize = 'none'; input.spellcheck = false;
-    form.append(input); form.onsubmit = e => { e.preventDefault(); if (input.value.trim()) show({ ...v, kind: 'search', q: input.value.trim().toLowerCase(), title: input.value.trim().toLowerCase() }); };
-    body.insertBefore(form, list);
-  }
-  list.append(el('p', '…', 'quiet pad'));
-  try {
-    let items = [];
-    if (v.kind === 'storage') items = (await read(v, 'r2')).result.map(b => row(b.name || b, '', () => show({ ...v, kind: 'bucket', bucket: b.name || b, title: b.name || b })));
-    else if (v.kind === 'bucket') items = (await read(v, 'r2_objects', { bucket: v.bucket })).result.map(o => row(o.key, size(o.size)));
-    else if (v.kind === 'workers') items = (await read(v, 'workers')).result.map(w => row(w.id || w.name, ''));
-    else if (v.kind === 'domains') items = (await read(v, 'zones')).result.map(z => row(z.name, '', () => show({ ...v, kind: 'records', zone: z, title: z.name })));
-    else if (v.kind === 'records') items = (await read(v, 'dns', { zone: v.zone.id })).result.map(r => row(`${r.type} ${r.name}`, r.content));
-    else if (v.kind === 'search') {
-      const out = await api('api/registrar/search', { connection_id: v.c.id, account_id: v.a.id, q: v.q });
-      const found = Array.isArray(out.result) ? out.result : (out.result?.domains || []);
-      items = found.map(d => row(d.name || d.domain_name || String(d), d.registrable === true ? 'Available' : d.registrable === false ? 'Taken' : ''));
-    }
-    if (mine !== seq) return;
-    list.replaceChildren(...(items.length ? items : [el('p', 'Nothing here', 'quiet pad')]));
-  } catch (e) { if (mine === seq) list.replaceChildren(el('p', e.message, 'quiet pad')); }
-}
-function size(n) { if (typeof n !== 'number') return ''; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return `${n < 10 && i ? n.toFixed(1) : Math.round(n)} ${u[i]}`; }
-
 // ---------- wiring ----------
-$('signin').onclick = signIn; $('add').onclick = signIn; $('cancel').onclick = () => { void cancel(); };
+$('signin').onclick = signIn; $('add').onclick = signIn; $('reauth-btn').onclick = signIn; $('cancel').onclick = () => { void cancel(); };
+renderPrompts();
 window.__wizardCloseOverlay = () => {
   if (home && (home.signin.status === 'pending' || home.signin.status === 'exchanging')) { void cancel(); return true; }
-  return back();
+  return false;
 };
 window.addEventListener('focus', () => { if (csrf) refresh().catch(() => {}); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && csrf) refresh().catch(() => {}); });
