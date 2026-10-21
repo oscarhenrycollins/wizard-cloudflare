@@ -2,7 +2,7 @@
 # the page and the agent never see them. Opened inside the Wizard shell at /wizard-cloudflare/.
 services:
   wizard-cloudflare:
-    image: ghcr.io/oscarhenrycollins/wizard-cloudflare:sha-b507e57fbd48fa7d890edfe41cb9820705b59c51@sha256:925bcbcc3bc96309a63a598477b776fe9ed8b6cb39f6ed52c8c41bb005cf15a8
+    image: ghcr.io/oscarhenrycollins/wizard-cloudflare:sha-1f3e448291ae98bce2e6b11f4139f99a7924f3ef@sha256:64b0290aa6c77d1ea59c80275ebd1ae62a881bfe2a469e821f0e06b07bda7949
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
