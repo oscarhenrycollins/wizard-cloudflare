@@ -10,7 +10,7 @@ function el(tag, text, cls) { const n = document.createElement(tag); if (cls) n.
 function btn(text, fn, cls) { const n = el('button', text, cls); n.type = 'button'; n.addEventListener('click', fn); return n; }
 function say(text) { $('status').textContent = text || ''; }
 const SVG = 'http://www.w3.org/2000/svg';
-const ICONS = { websites: 'M3 5h18v14H3zM3 9h18M7 7h.01M10 7h.01', storage: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3', domains: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z' };
+const ICONS = { websites: 'M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM3 9h18M9 9v11', storage: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3', domains: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zm-9 9h18M12 3c2.5 2.5 3.5 5.5 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-5.5-3.5-9s1-6.5 3.5-9z' };
 function icon(name) { const s = document.createElementNS(SVG, 'svg'); s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true'); const p = document.createElementNS(SVG, 'path'); p.setAttribute('d', ICONS[name]); s.append(p); return s; }
 async function api(path, body) {
   const init = { credentials: 'same-origin', cache: 'no-store', headers: {} };
@@ -44,24 +44,34 @@ function renderHome(waiting) {
   const logins = $('logins'); logins.replaceChildren();
   for (const c of home.connections) logins.append(btn(many ? `Sign out ${c.name}` : 'Sign out', () => signOut(c), 'link quiet'));
 }
+const LABELS = [['websites', 'Websites'], ['storage', 'Storage'], ['domains', 'Domains']];
+const shortName = name => String(name).replace(/'s Account$/i, '');
 function card(c, a, key, many) {
   const box = el('article', undefined, 'acct'); box.dataset.key = key;
-  const head = el('div', undefined, 'acct-h'); head.append(el('h3', a.name)); if (many) head.append(el('small', c.name)); box.append(head);
+  const head = el('div', undefined, 'acct-h'); head.append(el('h3', shortName(a.name))); if (many) head.append(el('small', c.name));
+  head.append(el('span', '', 'acct-note')); box.append(head);
   const grid = el('div', undefined, 'stats');
-  for (const [name, label] of [['websites', 'Websites'], ['storage', 'Storage'], ['domains', 'Domains']]) {
-    const t = el('div', undefined, 'stat'); t.dataset.metric = name; t.append(icon(name));
+  for (const [name, label] of LABELS) {
+    const t = el('div', undefined, 'stat'); t.dataset.metric = name;
+    const ic = el('span', undefined, 'ic'); ic.append(icon(name)); t.append(ic);
     const txt = el('span', undefined, 'stat-t'); txt.append(el('b', '…'), el('small', label)); t.append(txt); grid.append(t);
   }
   box.append(grid); paintCard(box, metrics.get(key)?.value); return box;
 }
 function paintCard(box, m) {
   if (!box || !m) return;
-  const set = (name, big, small) => { const t = box.querySelector(`[data-metric="${name}"]`); if (!t) return; t.querySelector('b').textContent = big; t.querySelector('small').textContent = small; t.classList.toggle('none', big === '—'); };
-  const n = v => (typeof v === 'number' ? v : null), fail = m.error ? 'Unavailable' : null;
+  const n = v => (typeof v === 'number' ? v : null);
   const w = n(m.websites), b = n(m.buckets), d = n(m.domains), bytes = m.storage?.bytes;
-  set('websites', w ? String(w) : '—', fail || (w === null ? 'Websites' : w ? (w === 1 ? 'Website' : 'Websites') : 'Not set up'));
-  set('storage', b ? (typeof bytes === 'number' ? size(bytes) : String(b)) : '—', fail || (b === null ? 'Storage' : b ? `${b} ${b === 1 ? 'bucket' : 'buckets'}` : 'Not set up'));
-  set('domains', d ? String(d) : '—', fail || (d === null ? 'Domains' : d ? (d === 1 ? 'Domain' : 'Domains') : 'Not set up'));
+  const values = { websites: w ? String(w) : '', storage: b ? (typeof bytes === 'number' ? size(bytes) : `${b}`) : '', domains: d ? String(d) : '' };
+  for (const [name, label] of LABELS) {
+    const t = box.querySelector(`[data-metric="${name}"]`); const v = values[name];
+    const one = name !== 'storage' && v === '1';
+    t.querySelector('b').textContent = v || '—'; t.querySelector('small').textContent = one ? label.slice(0, -1) : label; t.classList.toggle('none', !v);
+  }
+  // An account with nothing in use collapses to one quiet line; a failed read never shows an error wall.
+  const empty = !m.error && w === 0 && b === 0 && d === 0;
+  box.classList.toggle('empty', empty);
+  box.querySelector('.acct-note').textContent = m.error ? 'Couldn’t load' : empty ? 'Nothing set up yet' : '';
 }
 async function load(c, a, key) {
   const have = metrics.get(key); if (have && (have.pending || Date.now() - have.at < 60000)) return;
@@ -74,7 +84,7 @@ async function load(c, a, key) {
 }
 function renderPrompts() {
   const box = $('prompts'); box.replaceChildren();
-  for (const text of PROMPTS) box.append(btn(`“${text}”`, () => ask(text), 'prompt'));
+  for (const text of PROMPTS) box.append(btn(text, () => ask(text), 'prompt'));
 }
 async function ask(text) {
   let shared = false;
@@ -111,6 +121,8 @@ function renderApprovals() {
   for (const a of home.approvals) {
     const card = el('div', undefined, 'ask');
     card.append(el('p', `Your Wizard wants to ${a.text}`, 'ask-text'));
+    const where = home.connections.flatMap(c => c.accounts).find(x => x.id === a.account_id);
+    if (where) card.append(el('p', shortName(where.name), 'ask-where'));
     const acts = el('div', undefined, 'ask-acts');
     acts.append(btn('Approve', () => decide(a, true), 'action primary'), btn('Decline', () => decide(a, false), 'action'));
     const more = el('details'); more.append(el('summary', 'Details'), el('pre', JSON.stringify(a.payload, null, 2)));
