@@ -69,7 +69,8 @@ function paintCard(box, m) {
     t.querySelector('b').textContent = v || '—'; t.querySelector('small').textContent = one ? label.slice(0, -1) : label; t.classList.toggle('none', !v);
   }
   // An account with nothing in use collapses to one quiet line; a failed read never shows an error wall.
-  const empty = !m.error && w === 0 && b === 0 && d === 0;
+  // R2 answers "unauthorized" on accounts that never turned it on, so a blocked read counts as not in use here.
+  const empty = !m.error && [w, b, d].every(x => !x);
   box.classList.toggle('empty', empty);
   box.querySelector('.acct-note').textContent = m.error ? 'Couldn’t load' : empty ? 'Nothing set up yet' : '';
 }
