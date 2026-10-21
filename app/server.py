@@ -658,7 +658,9 @@ class Service:
   if action=='site.publish':manifest=scan_folder(payload['folder'],SITE_LIMITS)
   if action=='r2.backup':
    manifest=scan_folder(payload['folder'],BACKUP_LIMITS)
-   manifest['prefix']=(payload.get('prefix') or time.strftime('%Y-%m-%d',time.gmtime())+'/'+manifest['folder'].split('/')[-1]).strip('/')
+   # R2's REST API has no create-only PUT, so every backup gets its own fresh, unguessable folder (bound to the approval).
+   base=(payload.get('prefix') or time.strftime('%Y-%m-%d',time.gmtime())+'/'+manifest['folder'].split('/')[-1]).strip('/')
+   manifest['prefix']=f"{base}-{secrets.token_hex(4)}"
   with self.authorized(connection_id,account) as (connection,headers):
    if action.startswith('dns.'):self._verify_dns_binding(headers,account,action,payload)
    if action=='r2.backup':self._backup_free(account,payload['bucket'],manifest['prefix'],headers)

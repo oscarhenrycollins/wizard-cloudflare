@@ -199,8 +199,13 @@ class FolderTests(ServiceCase):
         out = self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'backups', 'folder': 'Sites/hello', 'prefix': 'p1'}, source='mcp')
         self.service.review(out['id'], 'owner'); result = self.service.confirm(out['id'], 'owner', out['payload_digest'])['result']
         self.assertEqual(result['files'], 2)
-        puts = [c[1].rsplit('/objects/', 1)[1] for c in self.fake.calls if c[0] == 'PUT']
-        self.assertEqual(sorted(puts), ['p1%2Fcss%2Fa.css', 'p1%2Findex.html'])
+        puts = sorted(server.urllib.parse.unquote(c[1].rsplit('/objects/', 1)[1]) for c in self.fake.calls if c[0] == 'PUT')
+        self.assertEqual([p.split('/', 1)[1] for p in puts], ['css/a.css', 'index.html']); self.assertRegex(puts[0], r'^p1-[0-9a-f]{8}/')
+
+    def test_two_backups_of_same_folder_never_share_keys(self):
+        one = self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'b', 'folder': 'Sites/hello', 'prefix': 'p'}, source='mcp')
+        two = self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'b', 'folder': 'Sites/hello', 'prefix': 'p'}, source='mcp')
+        self.assertNotEqual(json.loads(self.raw_manifest(one['id']))['prefix'], json.loads(self.raw_manifest(two['id']))['prefix'])
 
     def test_bad_names_rejected(self):
         self.problem('invalid_payload', lambda: self.service.validate_action('site.publish', {'script': 'Bad_Name', 'folder': 'Sites/hello'}))
@@ -230,14 +235,14 @@ class FolderTests(ServiceCase):
         with mock.patch.object(server.time, 'strftime', return_value='2026-10-21'):
             out = self.service.prepare(self.conn['id'], A, 'r2.backup', {'bucket': 'backups', 'folder': 'Sites/hello'}, source='mcp')
         manifest = json.loads(self.raw_manifest(out['id']))
-        self.assertEqual(manifest['prefix'], '2026-10-21/hello')
+        self.assertRegex(manifest['prefix'], r'^2026-10-21/hello-[0-9a-f]{8}$')
         self.assertEqual(out['payload_digest'], server.sha(server.canon({'payload': out['payload'], 'manifest': manifest})))
-        self.assertIn('backups/2026-10-21/hello', self.service.home('s')['approvals'][0]['text'])
+        self.assertIn('backups/' + manifest['prefix'], self.service.home('s')['approvals'][0]['text'])
         self.service.review(out['id'], 'owner')
         with mock.patch.object(server.time, 'strftime', return_value='2030-01-01'):
             self.service.confirm(out['id'], 'owner', out['payload_digest'])
         puts = [c[1].rsplit('/objects/', 1)[1] for c in self.fake.calls if c[0] == 'PUT']
-        self.assertTrue(puts and all(x.startswith('2026-10-21%2Fhello%2F') for x in puts))
+        self.assertTrue(puts and all(x.startswith(server.urllib.parse.quote(manifest['prefix'] + '/', safe='')) for x in puts))
 
     def test_backup_never_overwrites(self):
         self.fake.queue({'success': True, 'result': [{'key': 'p1/index.html'}]})

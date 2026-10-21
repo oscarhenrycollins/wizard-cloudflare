@@ -20,7 +20,7 @@ The owner signs in once in the Cloudflare app; you do everything else. Wizard li
 
 ## Back up my files
 1. Pick or create a bucket: `cloudflare_resources_read` section `r2`; if none fits, prepare `r2.bucket.create {"name": "wizard-backups"}` and get it approved first.
-2. Prepare `r2.backup {"bucket": "...", "folder": "<path in Files>"}` (optional `prefix`; default `YYYY-MM-DD/<folder name>`). Max 500 files, 64 MB each, 512 MB total; split larger folders.
+2. Prepare `r2.backup {"bucket": "...", "folder": "<path in Files>"}` (optional `prefix`; default `YYYY-MM-DD/<folder name>`; a short random tag is added so a backup never overwrites another). Max 500 files, 64 MB each, 512 MB total; split larger folders.
 3. Approve → status `succeeded` with `result.prefix` and file count. Note: Cloudflare R2 needs a payment method on the account (free tier still applies); if it fails with that, tell the owner to add one in Cloudflare billing.
 
 ## Find / buy a domain
