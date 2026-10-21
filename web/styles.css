@@ -63,11 +63,13 @@ main.wz-scroll{padding-bottom:48px}
  .stats{grid-template-columns:1fr;gap:4px}
  .stat{flex-direction:row;align-items:center;gap:10px;padding:6px 8px}
  .ic{width:26px;height:26px;border-radius:8px}
- .stat-t{flex-direction:row;align-items:baseline;gap:6px}
- .stat b{font-size:16px}
- .stat small{font-size:13px}
+ .stat-t{flex:1;min-width:0}
+ .stat b{font-size:16px;overflow:visible;text-overflow:clip}
+ .stat small{font-size:12px}
  .acct-h{flex-wrap:wrap;row-gap:0}
+ .acct-h h3{white-space:normal;overflow-wrap:anywhere}
  .acct-note{margin-left:0;flex-basis:100%}
  .prompt{width:100%}
 }
+@media (max-width:220px){.ic{display:none}.stat{padding:6px 8px}.acct-h h3{font-size:14px}}
 @media (min-width:720px){.prompts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.prompt{justify-content:center}}

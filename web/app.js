@@ -48,7 +48,7 @@ const LABELS = [['websites', 'Websites'], ['storage', 'Storage'], ['domains', 'D
 const shortName = name => String(name).replace(/'s Account$/i, '');
 function card(c, a, key, many) {
   const box = el('article', undefined, 'acct'); box.dataset.key = key;
-  const head = el('div', undefined, 'acct-h'); head.append(el('h3', shortName(a.name))); if (many) head.append(el('small', c.name));
+  const head = el('div', undefined, 'acct-h'); const title = el('h3', shortName(a.name)); title.title = a.name; head.append(title); if (many) head.append(el('small', c.name));
   head.append(el('span', '', 'acct-note')); box.append(head);
   const grid = el('div', undefined, 'stats');
   for (const [name, label] of LABELS) {
