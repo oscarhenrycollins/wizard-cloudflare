@@ -20,7 +20,8 @@ export default {async fetch(request){
  if(url.pathname===PREFIX||url.pathname===PREFIX+'privacy')return page(200,'<p>Read-only Cloudflare connection for your private Wizard. Testing release.</p><p>Credentials stay on your box. This stateless sign-in return page sees the authorization code and return address, but cannot exchange it without the private verifier held by your box. No storage, request logging or analytics. Your box contacts Cloudflare directly.</p><p>Cloudflare hosts account signup, consent and billing. Provider changes and purchases are disabled. No backup scheduler is included.</p><p><a href="https://github.com/oscarhenrycollins/wizard-cloudflare">Source and installation</a></p>');
  if(url.pathname!==PREFIX+'callback')return page(404,'<p>Not found.</p>');
  try {
-  if([...url.searchParams.keys()].some(k=>!['state','code','error','error_description','error_uri'].includes(k))||['state','code','error'].some(k=>url.searchParams.getAll(k).length>1))throw Error('query');
+  // Cloudflare appends extra OAuth parameters (scope, iss, ...). Accept them, but never forward them.
+  if([...url.searchParams.keys()].length>12||['state','code','error'].some(k=>url.searchParams.getAll(k).length>1))throw Error('query');
   const state=url.searchParams.get('state'); const target=parseState(state);
   const code=url.searchParams.get('code'); const error=url.searchParams.get('error');
   if(Boolean(code)===Boolean(error)||code&&(!/^[\x21-\x7e]{1,4096}$/.test(code))||error&&!/^[a-zA-Z0-9_]{1,80}$/.test(error))throw Error('response');
