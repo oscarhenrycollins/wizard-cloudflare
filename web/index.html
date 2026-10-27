@@ -1,18 +1,15 @@
 <!doctype html>
-<html lang="en" data-app="wizard-cloudflare"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>Cloudflare</title><script src="boot.js"></script><link rel="stylesheet" href="wizard-ui.css"><link rel="stylesheet" href="styles.css"><script defer src="theme-client.js"></script><script defer src="app.js"></script></head>
+<html lang="en" data-app="wizard-cloudflare"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>Cloudflare</title><script src="boot.js"></script><link rel="stylesheet" href="wizard-ui.css"><link rel="stylesheet" href="wizard-layout.css"><link rel="stylesheet" href="styles.css"><script defer src="theme-client.js"></script><script defer src="app.js"></script><script defer src="wizard-sheet.js"></script></head>
 <body><div class="wz-app"><header class="wz-head"><h1 id="title">Cloudflare</h1></header><main class="wz-scroll">
-<section id="approvals" hidden></section>
-<section id="signed-out" class="hero" hidden>
- <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7.5 19a4.5 4.5 0 0 1-.9-8.9 6 6 0 0 1 11.6 1.4A3.75 3.75 0 0 1 17.25 19z"/></svg></div>
- <p class="line" id="line">Not connected</p>
- <button id="signin" class="action primary wide" type="button">Sign in with Cloudflare</button>
- <p class="hint" id="new-hint">No account? <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener noreferrer">Sign up free</a>, then sign in.</p>
-</section>
-<section id="waiting" class="hero" hidden><div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7.5 19a4.5 4.5 0 0 1-.9-8.9 6 6 0 0 1 11.6 1.4A3.75 3.75 0 0 1 17.25 19z"/></svg></div><p class="line">Waiting for Cloudflare…</p><button id="cancel" class="action wide" type="button">Cancel</button></section>
-<section id="signed-in" hidden>
- <div id="reauth" class="reauth" hidden><p>Sign in again to let your Wizard make changes</p><button id="reauth-btn" class="action primary" type="button">Sign in</button></div>
- <div id="accounts" class="cards"></div>
- <div class="ask-wiz"><p class="sec">Ask your Wizard</p><div id="prompts" class="prompts"></div></div>
- <div class="foot"><button id="add" class="link" type="button">+ Add account</button><span id="logins"></span></div>
-</section>
-</main><p id="status" class="wz-status" role="status" aria-live="polite"></p></div></body></html>
+<div class="wz-conn"><span class="wz-tile cf-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7.5 19a4.5 4.5 0 0 1-.9-8.9 6 6 0 0 1 11.6 1.4A3.75 3.75 0 0 1 17.25 19z"/></svg></span>
+ <span class="wz-main"><b>Cloudflare</b><small id="line">Publish sites, back up files, find domains</small></span>
+ <span id="pill" class="wz-pill off">Not connected</span></div>
+<section id="approvals" class="wz-sec" hidden><h2 class="wz-sec-h">Waiting for you <span class="wz-count" id="approval-count">0</span></h2><div id="approval-list" class="cf-asks"></div></section>
+<section id="accounts-sec" class="wz-sec" hidden><h2 class="wz-sec-h">Accounts <span class="wz-count" id="account-count">0</span></h2><ul id="accounts" class="wz-list"></ul></section>
+<div id="sections" class="wz-grid cf-sections" hidden></div>
+<div class="wz-actions"><button id="signin" class="wz-button" type="button">Connect</button><button id="cancel" class="wz-button secondary" type="button" hidden>Cancel</button></div>
+<p class="cf-hint" id="new-hint">No account? <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener noreferrer">Sign up free</a></p>
+<details class="wz-more"><summary>Details</summary><div id="details" class="cf-details"></div></details>
+</main><p id="status" class="wz-status" role="status" aria-live="polite"></p></div>
+<dialog id="account-sheet" class="wz-sheet" aria-labelledby="account-sheet-h"><h2 id="account-sheet-h">Account</h2><div id="account-sheet-body"></div></dialog>
+</body></html>

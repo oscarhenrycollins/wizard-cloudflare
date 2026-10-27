@@ -1043,7 +1043,7 @@ class Handler(BaseHTTPRequestHandler):
     return self.send_json(200,output)
    self.host_guard(); asset='index.html' if path in ('','/') else path.lstrip('/')
    if asset=='openapi.json':source=ROOT/'openapi.json'
-   elif asset in {'index.html','app.js','styles.css','boot.js','theme-client.js','wizard-ui.css'}:source=WEB/asset
+   elif asset in {'index.html','app.js','styles.css','boot.js','theme-client.js','wizard-ui.css','wizard-layout.css','wizard-sheet.js'}:source=WEB/asset
    else:raise Problem(404,'not_found','Not found.')
    raw=source.read_bytes(); content_type=mimetypes.guess_type(asset)[0] or 'application/octet-stream'; self.send_response(200); self._security_headers(content_type+('; charset=utf-8' if content_type.startswith(('text/','application/javascript')) else '')); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
   except (KeyError,TypeError,ValueError):self.fail(Problem(400,'invalid_parameter','Invalid parameter.'))
