@@ -38,6 +38,8 @@ class SyntheticProvider:
             result = {'buckets': [{'name': 'fixture-bucket', 'creation_date': '2026-01-01T00:00:00Z'}]}
         elif method == 'GET' and '/r2/buckets/fixture-bucket/objects' in path:
             result = [{'key': 'encrypted-snapshot.bin', 'size': 42, 'etag': 'synthetic-etag', 'last_modified': '2026-01-01T00:00:00Z'}]
+        elif method == 'GET' and path.endswith('/r2/metrics'):
+            result = {'standard': {'published': {'payloadSize': 123456789, 'metadataSize': 0, 'objects': 3}}}
         elif method == 'GET' and path.endswith('/workers/scripts'):
             result = [{'id': 'fixture-worker', 'modified_on': '2026-01-01T00:00:00Z'}]
         elif method == 'GET' and path.endswith('/workers/scripts/fixture-worker/settings'):
