@@ -10,8 +10,8 @@
     "network"
   ],
   "description": "Sign in to Cloudflare once (or create a free account there). The app shows each account's websites, storage and domains; your Wizard does the work: publish a Files folder as a website, back up folders to R2, change DNS and price domains. Every change waits for your Approve tap; nothing is deleted or bought. Configure your own shell host/origin and owner login.",
-  "tipi_version": 11,
-  "version": "1.4.4",
+  "tipi_version": 12,
+  "version": "1.4.5",
   "source": "https://github.com/oscarhenrycollins/wizard-cloudflare",
   "exposable": false,
   "supported_architectures": [
